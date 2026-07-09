@@ -66,11 +66,11 @@ type Pair struct {
 
 type Info struct {
 	Addr    string // address and port number of the node, e.g., "localhost:1234"
-	sucAddr string
-	sucCode hint
-	preAddr string
-	preCode hint
-	code    hint
+	SucAddr string
+	SucCode hint
+	PreAddr string
+	PreCode hint
+	Code    hint
 }
 
 type Node struct {
@@ -88,12 +88,12 @@ type Node struct {
 // Addr is the address and port number of the node, e.g., "localhost:1234".
 func (node *Node) Init(addr string) {
 	node.info.Addr = addr
-	node.info.code = hashCode(addr)
-	node.info.preCode = node.info.code
-	node.info.sucCode = node.info.code
+	node.info.SucAddr = addr
+	node.info.PreAddr = addr
+	node.info.Code = hashCode(addr)
+	node.info.PreCode = node.info.Code
+	node.info.SucCode = node.info.Code
 	node.data = make(map[MyKey]string)
-	node.info.sucAddr = addr
-	node.info.preAddr = addr
 }
 
 func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
@@ -108,7 +108,9 @@ func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
 	for node.online {
 		conn, err := node.listener.Accept()
 		if err != nil {
-			logrus.Error("accept error: ", err)
+			if node.online {
+				logrus.Error("accept error: ", err)
+			}
 			return
 		}
 		go node.server.ServeConn(conn)
@@ -163,7 +165,7 @@ func (node *Node) RemoteCall(addr string, method string, args interface{}, reply
 func (n *Node) MoveData(code hint, reply *map[MyKey]string) error {
 	n.dataLock.Lock()
 	for k, v := range n.data {
-		if !Contain(k.Code, code+1, n.info.code) {
+		if !Contain(k.Code, code+1, n.info.Code) {
 			(*reply)[k] = v
 			delete(n.data, k)
 		}
@@ -189,48 +191,50 @@ func (node *Node) Create() {
 	logrus.Info("Create")
 }
 
-func (node *Node) GetInfo(_ *struct{}, reply *Info) error {
+func (node *Node) GetInfo(_ struct{}, reply *Info) error {
 	*reply = node.info
 	return nil
 }
 
-func (node *Node) FindSuc(id hint, reply *Info) error {
+func (node *Node) FindSuc(id hint, reply *string) error {
 	tmp := node.info
 	for {
-		logrus.Infoln(node.info.Addr, id, tmp.preCode, tmp.code)
-		flag := Contain(id, tmp.preCode+1, tmp.code)
+		logrus.Infoln(node.info.Addr, id, tmp.PreCode, tmp.Code)
+		flag := Contain(id, tmp.PreCode+1, tmp.Code)
 		if flag {
 			break
 		}
-		node.RemoteCall(tmp.sucAddr, "Node.GetInfo", nil, &tmp)
+		node.RemoteCall(tmp.SucAddr, "Node.GetInfo", struct{}{}, &tmp)
 	}
 	logrus.Infof("finish")
-	*reply = tmp
+	*reply = tmp.Addr
 	return nil
 }
 func (node *Node) PreLink(x Info, reply *struct{}) error {
-	node.info.preAddr = x.Addr
-	node.info.preCode = x.code
+	node.info.PreAddr = x.Addr
+	node.info.PreCode = x.Code
 	return nil
 }
 func (node *Node) SucLink(x Info, reply *struct{}) error {
-	node.info.sucAddr = x.Addr
-	node.info.sucCode = x.code
+	node.info.SucAddr = x.Addr
+	node.info.SucCode = x.Code
 	return nil
 }
 func (node *Node) Join(addr string) bool {
 	logrus.Infof("Join %s", addr)
-	node.RemoteCall(addr, "Node.FindSuc", node.info.code, &node.info.sucAddr)
+	node.RemoteCall(addr, "Node.FindSuc", node.info.Code, &node.info.SucAddr)
 	var tmp1, tmp2 Info
-	node.RemoteCall(node.info.sucAddr, "Node.GetInfo", nil, tmp1)
-	node.info.preAddr = tmp1.preAddr
-	node.RemoteCall(node.info.preAddr, "Node.GetInfo", nil, tmp2)
-	node.info.sucCode = tmp1.code
-	node.info.preCode = tmp2.code
+	node.RemoteCall(node.info.SucAddr, "Node.GetInfo", struct{}{}, &tmp1)
+	logrus.Info("suc:", tmp1.Addr, tmp1.PreAddr, ";")
+	node.info.PreAddr = tmp1.PreAddr
+	node.RemoteCall(node.info.PreAddr, "Node.GetInfo", struct{}{}, &tmp2)
+	node.info.SucCode = tmp1.Code
+	node.info.PreCode = tmp2.Code
 	node.data = make(map[MyKey]string)
-	node.RemoteCall(node.info.sucAddr, "Node.MoveData", node.info.code, node.data)
-	node.RemoteCall(node.info.preAddr, "Node.SucLink", node.info, nil)
-	node.RemoteCall(node.info.sucAddr, "Node.PreLink", node.info, nil)
+	node.RemoteCall(node.info.SucAddr, "Node.MoveData", node.info.Code, &node.data)
+	node.RemoteCall(node.info.PreAddr, "Node.SucLink", node.info, nil)
+	node.RemoteCall(node.info.SucAddr, "Node.PreLink", node.info, nil)
+	logrus.Infof("Join finish")
 	return true
 }
 
@@ -242,8 +246,8 @@ func (node *Node) PutPair(pair Pair, _ *struct{}) error {
 }
 
 type Prply struct {
-	ok  bool
-	val string
+	Ok  bool
+	Val string
 }
 
 func (node *Node) GetPair(key MyKey, reply *Prply) error {
@@ -268,29 +272,29 @@ func (node *Node) DeletePair(key MyKey, reply *bool) error {
 func (node *Node) Put(key string, value string) bool {
 	logrus.Infof("Put %s %s", key, value)
 	tmp := Pair{MyKey{key, hashCode(key)}, value}
-	var x Info
+	var x string
 	node.FindSuc(tmp.Key.Code, &x)
-	node.RemoteCall(x.Addr, "PutPair", tmp, nil)
+	node.RemoteCall(x, "Node.PutPair", tmp, nil)
 	return true
 }
 
 func (node *Node) Get(key string) (bool, string) {
 	logrus.Infof("Get %s", key)
 	var tmp Prply
-	var x Info
+	var x string
 	k := MyKey{key, hashCode(key)}
 	node.FindSuc(k.Code, &x)
-	node.RemoteCall(x.Addr, "Node.GetPair", k, &tmp)
-	return tmp.ok, tmp.val
+	node.RemoteCall(x, "Node.GetPair", k, &tmp)
+	return tmp.Ok, tmp.Val
 }
 
 func (node *Node) Delete(key string) bool {
 	logrus.Infof("Delete %s", key)
 	k := MyKey{key, hashCode(key)}
-	var x Info
+	var x string
 	node.FindSuc(k.Code, &x)
 	var tmp bool
-	node.RemoteCall(x.Addr, "DeletePair", k, &tmp)
+	node.RemoteCall(x, "Node.DeletePair", k, &tmp)
 	return tmp
 }
 
@@ -305,14 +309,14 @@ func (node *Node) RecvData(d map[MyKey]string, _ *struct{}) error {
 
 func (node *Node) Quit() {
 	logrus.Infof("Quit %s", node.info.Addr)
-	node.RemoteCall(node.info.sucAddr, "Node.RecvData", node.data, nil)
+	node.RemoteCall(node.info.SucAddr, "Node.RecvData", node.data, nil)
 	var tmp1, tmp2 Info
-	tmp1.code = node.info.preCode
-	tmp1.Addr = node.info.preAddr
-	tmp2.code = node.info.sucCode
-	tmp2.Addr = node.info.sucAddr
-	node.RemoteCall(node.info.sucAddr, "Node.PreLink", tmp1, nil)
-	node.RemoteCall(node.info.preAddr, "Node.SucLink", tmp2, nil)
+	tmp1.Code = node.info.PreCode
+	tmp1.Addr = node.info.PreAddr
+	tmp2.Code = node.info.SucCode
+	tmp2.Addr = node.info.SucAddr
+	node.RemoteCall(node.info.SucAddr, "Node.PreLink", tmp1, nil)
+	node.RemoteCall(node.info.PreAddr, "Node.SucLink", tmp2, nil)
 	node.StopRPCServer()
 }
 
