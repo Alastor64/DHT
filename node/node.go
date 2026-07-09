@@ -27,11 +27,11 @@ func init() {
 	logrus.SetOutput(f)
 }
 
-type hint = uint32
+type hint = uint8
 
 const (
-	m    = hint(32)
-	base = hint(269)
+	m    = hint(8)
+	base = 37 //hint(269)
 )
 
 func Contain(x, l, r hint) bool {
@@ -222,9 +222,15 @@ func (node *Node) SucLink(x Info, reply *struct{}) error {
 }
 func (node *Node) Join(addr string) bool {
 	logrus.Infof("Join %s", addr)
-	node.RemoteCall(addr, "Node.FindSuc", node.info.Code, &node.info.SucAddr)
 	var tmp1, tmp2 Info
-	node.RemoteCall(node.info.SucAddr, "Node.GetInfo", struct{}{}, &tmp1)
+	for {
+		node.RemoteCall(addr, "Node.FindSuc", node.info.Code, &node.info.SucAddr)
+		node.RemoteCall(node.info.SucAddr, "Node.GetInfo", struct{}{}, &tmp1)
+		if tmp1.Code != node.info.Code {
+			break
+		}
+		node.info.Code++
+	}
 	logrus.Info("suc:", tmp1.Addr, tmp1.PreAddr, ";")
 	node.info.PreAddr = tmp1.PreAddr
 	node.RemoteCall(node.info.PreAddr, "Node.GetInfo", struct{}{}, &tmp2)
