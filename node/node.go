@@ -27,39 +27,80 @@ func init() {
 	logrus.SetOutput(f)
 }
 
-type Node struct {
-	Addr   string // address and port number of the node, e.g., "localhost:1234"
-	online bool
+type hint = uint32
 
-	listener  net.Listener
-	server    *rpc.Server
-	data      map[string]string
-	dataLock  sync.RWMutex
-	peers     map[string]struct{} // we use map as a set
-	peersLock sync.RWMutex
+const (
+	m    = hint(32)
+	base = hint(269)
+)
+
+func Contain(x, l, r hint) bool {
+	if l <= r {
+		return l <= x && x <= r
+	} else {
+		return l <= x || x <= r
+	}
+}
+
+func hashCode(s string) hint {
+	val := hint(0)
+	for i := 0; i < len(s); i++ {
+		val *= base
+		val += hint(s[i])
+	}
+	return val
+}
+
+type MyKey struct {
+	Key  string
+	Code hint
 }
 
 // Pair is used to store a key-value pair.
 // Note: It must be exported (i.e., Capitalized) so that it can be
 // used as the argument type of RPC methods.
 type Pair struct {
-	Key   string
+	Key   MyKey
 	Value string
+}
+
+type Info struct {
+	Addr    string // address and port number of the node, e.g., "localhost:1234"
+	sucAddr string
+	sucCode hint
+	preAddr string
+	preCode hint
+	code    hint
+}
+
+type Node struct {
+	info   Info
+	online bool
+
+	listener net.Listener
+	server   *rpc.Server
+	data     map[MyKey]string
+	dataLock sync.RWMutex
+	relaLock sync.RWMutex
 }
 
 // Initialize a node.
 // Addr is the address and port number of the node, e.g., "localhost:1234".
 func (node *Node) Init(addr string) {
-	node.Addr = addr
-	node.data = make(map[string]string)
-	node.peers = make(map[string]struct{})
+	node.info.Addr = addr
+	node.info.code = hashCode(addr)
+	node.info.preCode = node.info.code
+	node.info.sucCode = node.info.code
+	node.data = make(map[MyKey]string)
+	node.info.sucAddr = addr
+	node.info.preAddr = addr
 }
 
 func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
 	node.server = rpc.NewServer()
 	node.server.Register(node)
 	var err error
-	node.listener, err = net.Listen("tcp", node.Addr)
+	node.listener, err = net.Listen("tcp", node.info.Addr)
 	wg.Done()
 	if err != nil {
 		logrus.Fatal("listen error: ", err)
@@ -85,7 +126,7 @@ func (node *Node) StopRPCServer() {
 // Re-connect to the client every time can be slow. You can use connection pool to improve the performance.
 func (node *Node) RemoteCall(addr string, method string, args interface{}, reply interface{}) error {
 	if method != "Node.Ping" {
-		logrus.Infof("[%s] RemoteCall %s %s %v", node.Addr, addr, method, args)
+		logrus.Infof("[%s] RemoteCall %s %s %v", node.info.Addr, addr, method, args)
 	}
 	// Note: Here we use DialTimeout to set a timeout of 10 seconds.
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
@@ -117,54 +158,21 @@ func (node *Node) RemoteCall(addr string, method string, args interface{}, reply
 
 // Here we use "_" to ignore the arguments we don't need.
 // The empty struct "{}" is used to represent "void" in Go.
-
-func (node *Node) GetData(_ string, reply *map[string]string) error {
-	node.dataLock.RLock()
-	*reply = node.data
-	node.dataLock.RUnlock()
-	return nil
-}
-
-func (node *Node) GetPeers(_ string, reply *map[string]struct{}) error {
-	node.peersLock.RLock()
-	*reply = node.peers
-	node.peersLock.RUnlock()
-	return nil
-}
-
-func (node *Node) AddPeer(addr string, _ *struct{}) error {
-	node.peersLock.Lock()
-	node.peers[addr] = struct{}{}
-	node.peersLock.Unlock()
+//保证reply是空map
+//code是n的前驱
+func (n *Node) MoveData(code hint, reply *map[MyKey]string) error {
+	n.dataLock.Lock()
+	for k, v := range n.data {
+		if !Contain(k.Code, code+1, n.info.code) {
+			(*reply)[k] = v
+			delete(n.data, k)
+		}
+	}
+	n.dataLock.Unlock()
 	return nil
 }
 
 func (node *Node) Ping(_ string, _ *struct{}) error {
-	return nil
-}
-
-func (node *Node) RemovePeer(addr string, _ *struct{}) error {
-	_, ok := node.peers[addr]
-	if !ok {
-		return nil
-	}
-	node.peersLock.Lock()
-	delete(node.peers, addr)
-	node.peersLock.Unlock()
-	return nil
-}
-
-func (node *Node) PutPair(pair Pair, _ *struct{}) error {
-	node.dataLock.Lock()
-	node.data[pair.Key] = pair.Value
-	node.dataLock.Unlock()
-	return nil
-}
-
-func (node *Node) DeletePair(key string, _ *struct{}) error {
-	node.dataLock.Lock()
-	delete(node.data, key)
-	node.dataLock.Unlock()
 	return nil
 }
 
@@ -181,83 +189,128 @@ func (node *Node) Create() {
 	logrus.Info("Create")
 }
 
-// Broadcast a RPC call to all the nodes in the network.
-// If a node is offline, remove it from the peer list.
-func (node *Node) broadcastCall(method string, args interface{}, reply interface{}) {
-	offlinePeers := make([]string, 0)
-	node.peersLock.RLock()
-	for peer := range node.peers {
-		err := node.RemoteCall(peer, method, args, reply)
-		if err != nil {
-			offlinePeers = append(offlinePeers, peer)
-		}
-	}
-	node.peersLock.RUnlock()
-	if len(offlinePeers) > 0 {
-		node.peersLock.Lock()
-		for _, peer := range offlinePeers {
-			delete(node.peers, peer)
-		}
-		node.peersLock.Unlock()
-	}
+func (node *Node) GetInfo(_ struct{}, reply *Info) error {
+	*reply = node.info
+	return nil
 }
 
+func (node *Node) FindSuc(id hint, reply *Info) error {
+	tmp := node.info
+	for {
+		flag := Contain(id, tmp.preCode+1, tmp.code)
+		if flag {
+			break
+		}
+		node.RemoteCall(tmp.sucAddr, "Node.GetInfo", struct{}{}, &tmp)
+	}
+	*reply = tmp
+	return nil
+}
+func (node *Node) PreLink(x Info, reply *struct{}) error {
+	node.info.preAddr = x.Addr
+	node.info.preCode = x.code
+	return nil
+}
+func (node *Node) SucLink(x Info, reply *struct{}) error {
+	node.info.sucAddr = x.Addr
+	node.info.sucCode = x.code
+	return nil
+}
 func (node *Node) Join(addr string) bool {
 	logrus.Infof("Join %s", addr)
-	// Copy data from the node at addr.
-	node.dataLock.Lock()
-	node.RemoteCall(addr, "Node.GetData", "", &node.data)
-	node.dataLock.Unlock()
-	// Copy the peer list from the node at addr.
-	node.peersLock.Lock()
-	node.RemoteCall(addr, "Node.GetPeers", "", &node.peers)
-	node.peers[addr] = struct{}{}
-	node.peersLock.Unlock()
-	// Inform all the nodes in the network that a new node has joined.
-	node.broadcastCall("Node.AddPeer", node.Addr, nil)
+	node.RemoteCall(addr, "Node.FindSuc", node.info.code, &node.info.sucAddr)
+	var tmp1, tmp2 Info
+	node.RemoteCall(node.info.sucAddr, "Node.GetInfo", struct{}{}, tmp1)
+	node.info.preAddr = tmp1.preAddr
+	node.RemoteCall(node.info.preAddr, "Node.GetInfo", struct{}{}, tmp2)
+	node.info.sucCode = tmp1.code
+	node.info.preCode = tmp2.code
+	node.data = make(map[MyKey]string)
+	node.RemoteCall(node.info.sucAddr, "Node.MoveData", node.info.code, node.data)
+	node.RemoteCall(node.info.preAddr, "Node.SucLink", node.info, nil)
+	node.RemoteCall(node.info.sucAddr, "Node.PreLink", node.info, nil)
 	return true
+}
+
+func (node *Node) PutPair(pair Pair, _ *struct{}) error {
+	node.dataLock.Lock()
+	node.data[pair.Key] = pair.Value
+	node.dataLock.Unlock()
+	return nil
+}
+
+type Prply struct {
+	ok  bool
+	val string
+}
+
+func (node *Node) GetPair(key MyKey, reply *Prply) error {
+	node.dataLock.RLock()
+	v, o := node.data[key]
+	*reply = Prply{o, v}
+	node.dataLock.RUnlock()
+	return nil
+}
+
+func (node *Node) DeletePair(key MyKey, reply *bool) error {
+	node.dataLock.Lock()
+	_, ok := node.data[key]
+	if ok {
+		delete(node.data, key)
+	}
+	*reply = ok
+	node.dataLock.Unlock()
+	return nil
 }
 
 func (node *Node) Put(key string, value string) bool {
 	logrus.Infof("Put %s %s", key, value)
-	node.dataLock.Lock()
-	node.data[key] = value
-	node.dataLock.Unlock()
-	// Broadcast the new key-value pair to all the nodes in the network.
-	node.broadcastCall("Node.PutPair", Pair{key, value}, nil)
+	tmp := Pair{MyKey{key, hashCode(key)}, value}
+	var x Info
+	node.FindSuc(tmp.Key.Code, &x)
+	node.RemoteCall(x.Addr, "PutPair", tmp, nil)
 	return true
 }
 
 func (node *Node) Get(key string) (bool, string) {
 	logrus.Infof("Get %s", key)
-	node.dataLock.RLock()
-	value, ok := node.data[key]
-	node.dataLock.RUnlock()
-	return ok, value
+	var tmp Prply
+	var x Info
+	k := MyKey{key, hashCode(key)}
+	node.FindSuc(k.Code, &x)
+	node.RemoteCall(x.Addr, "Node.GetPair", k, &tmp)
+	return tmp.ok, tmp.val
 }
 
 func (node *Node) Delete(key string) bool {
 	logrus.Infof("Delete %s", key)
-	// Check if the key exists.
-	node.dataLock.RLock()
-	_, ok := node.data[key]
-	node.dataLock.RUnlock()
-	if !ok {
-		return false
-	}
-	// Delete the key-value pair.
+	k := MyKey{key, hashCode(key)}
+	var x Info
+	node.FindSuc(k.Code, &x)
+	var tmp bool
+	node.RemoteCall(x.Addr, "DeletePair", k, &tmp)
+	return tmp
+}
+
+func (node *Node) RecvData(d map[MyKey]string, _ *struct{}) error {
 	node.dataLock.Lock()
-	delete(node.data, key)
+	for k, v := range d {
+		node.data[k] = v
+	}
 	node.dataLock.Unlock()
-	// Broadcast the deletion to all the nodes in the network.
-	node.broadcastCall("Node.DeletePair", key, nil)
-	return true
+	return nil
 }
 
 func (node *Node) Quit() {
-	logrus.Infof("Quit %s", node.Addr)
-	// Inform all the nodes in the network that this node is quitting.
-	node.broadcastCall("Node.RemovePeer", node.Addr, nil)
+	logrus.Infof("Quit %s", node.info.Addr)
+	node.RemoteCall(node.info.sucAddr, "Node.RecvData", node.data, nil)
+	var tmp1, tmp2 Info
+	tmp1.code = node.info.preCode
+	tmp1.Addr = node.info.preAddr
+	tmp2.code = node.info.sucCode
+	tmp2.Addr = node.info.sucAddr
+	node.RemoteCall(node.info.sucAddr, "Node.PreLink", tmp1, nil)
+	node.RemoteCall(node.info.preAddr, "Node.SucLink", tmp2, nil)
 	node.StopRPCServer()
 }
 
