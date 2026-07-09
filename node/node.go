@@ -189,7 +189,7 @@ func (node *Node) Create() {
 	logrus.Info("Create")
 }
 
-func (node *Node) GetInfo(_ struct{}, reply *Info) error {
+func (node *Node) GetInfo(_ *struct{}, reply *Info) error {
 	*reply = node.info
 	return nil
 }
@@ -197,12 +197,14 @@ func (node *Node) GetInfo(_ struct{}, reply *Info) error {
 func (node *Node) FindSuc(id hint, reply *Info) error {
 	tmp := node.info
 	for {
+		logrus.Infoln(node.info.Addr, id, tmp.preCode, tmp.code)
 		flag := Contain(id, tmp.preCode+1, tmp.code)
 		if flag {
 			break
 		}
-		node.RemoteCall(tmp.sucAddr, "Node.GetInfo", struct{}{}, &tmp)
+		node.RemoteCall(tmp.sucAddr, "Node.GetInfo", nil, &tmp)
 	}
+	logrus.Infof("finish")
 	*reply = tmp
 	return nil
 }
@@ -220,9 +222,9 @@ func (node *Node) Join(addr string) bool {
 	logrus.Infof("Join %s", addr)
 	node.RemoteCall(addr, "Node.FindSuc", node.info.code, &node.info.sucAddr)
 	var tmp1, tmp2 Info
-	node.RemoteCall(node.info.sucAddr, "Node.GetInfo", struct{}{}, tmp1)
+	node.RemoteCall(node.info.sucAddr, "Node.GetInfo", nil, tmp1)
 	node.info.preAddr = tmp1.preAddr
-	node.RemoteCall(node.info.preAddr, "Node.GetInfo", struct{}{}, tmp2)
+	node.RemoteCall(node.info.preAddr, "Node.GetInfo", nil, tmp2)
 	node.info.sucCode = tmp1.code
 	node.info.preCode = tmp2.code
 	node.data = make(map[MyKey]string)
