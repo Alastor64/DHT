@@ -30,8 +30,9 @@ func init() {
 type hint = uint8
 
 const (
-	m    = hint(8)
-	base = 37 //hint(269)
+	m        = hint(8)
+	base     = 37 //hint(269)
+	ticktime = 20 * time.Millisecond
 )
 
 func Contain(x, l, r hint) bool {
@@ -74,13 +75,16 @@ type Node struct {
 	id     MyString
 	online bool
 
-	listener  net.Listener
-	server    *rpc.Server
-	data      map[MyString]string
-	dataLock  sync.RWMutex
-	routeLock sync.RWMutex
-	suc       MyString
-	pre       MyString
+	listener   net.Listener
+	server     *rpc.Server
+	data       map[MyString]string
+	dataLock   sync.RWMutex
+	routeLock  sync.RWMutex
+	fingerLock sync.RWMutex
+	suc        MyString
+	pre        MyString
+	finger     []MyString
+	fix_cnt    hint
 }
 
 // Initialize a node.
@@ -91,6 +95,7 @@ func (node *Node) Init(addr string) {
 	node.suc = node.id
 	node.pre = node.id
 	node.data = make(map[MyString]string)
+	node.finger = make([]MyString, m)
 }
 
 func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
@@ -178,7 +183,90 @@ func (node *Node) Ping(_ string, _ *struct{}) error {
 //
 // DHT methods
 //
+func (node *Node) ping(addr string) bool {
+	return node.RemoteCall(node.suc.Val, "Node.Ping", struct{}{}, nil) == nil
+}
+func (node *Node) LiveSuc() MyString {
+	node.routeLock.RLock()
+	tmp := node.suc
+	node.routeLock.RUnlock()
+	if node.ping(tmp.Val) {
+		return tmp
+	}
+	node.fingerLock.RLock()
+	defer node.fingerLock.RUnlock()
+	for i := hint(0); i < m; i++ {
+		if node.ping(node.finger[i].Val) {
+			return node.finger[i]
+		}
+	}
+	return node.id
+}
+func (node *Node) GetPre(_ struct{}, reply *MyString) error {
+	*reply = node.pre
+	return nil
+}
+func (node *Node) Notify(x MyString, reply *struct{}) error {
+	if node.pre.Val == "" || Contain(x.Code, node.pre.Code, node.id.Code) {
+		node.routeLock.Lock()
+		node.pre = x
+		node.routeLock.Unlock()
+	}
+	return nil
+}
+func (node *Node) Stabilize() {
+	sn := node.LiveSuc()
+	var pn MyString
+	node.RemoteCall(sn.Val, "Node.GetPre", struct{}{}, &pn)
+	if pn.Val != "" && Contain(pn.Code, node.id.Code, sn.Code) {
+		node.routeLock.Lock()
+		node.suc = pn
+		node.routeLock.Unlock()
+	}
+	node.RemoteCall(sn.Val, "Node.Notify", node.id, nil)
+}
+func (node *Node) FingerPre(id hint, reply *MyString) error {
+	node.fingerLock.RLock()
+	defer node.fingerLock.RUnlock()
+	for i := m; i > 0; i-- {
+		if Contain(node.finger[i-1].Code, node.id.Code, id-1) && node.ping(node.finger[i-1].Val) {
+			*reply = node.finger[i-1]
+			return nil
+		}
+	}
+	*reply = node.id
+	return nil
+}
+func (node *Node) FindSuc(id hint, reply *MyString) error {
+	if node.id.Code == id {
+		*reply = node.id
+		return nil
+	}
 
+	now := node.id
+	suc := node.LiveSuc()
+	for !Contain(id, now.Code+1, suc.Code) {
+		node.RemoteCall(now.Val, "Node.FingerPre", id, &now)
+		suc = node.LiveSuc()
+	}
+	*reply = suc
+	return nil
+}
+func (node *Node) fixFinger() {
+	var tmp MyString
+	node.RemoteCall(node.id.Val, "Node.FindSuc", node.id.Code+(hint(1)<<node.fix_cnt), &tmp)
+	node.fingerLock.Lock()
+	defer node.fingerLock.Unlock()
+	node.finger[node.fix_cnt] = tmp
+	node.fix_cnt++
+}
+func (node *Node) period() {
+	for node.online {
+		node.Stabilize()
+		node.fixFinger()
+		time.Sleep(ticktime)
+	}
+}
 func (node *Node) Run(wg *sync.WaitGroup) {
 	node.online = true
 	go node.RunRPCServer(wg)
@@ -200,21 +288,6 @@ func (node *Node) GetInfo(_ struct{}, reply *Smpl) error {
 	return nil
 }
 
-func (node *Node) FindSuc(id hint, reply *string) error {
-	tmp := node.Inform()
-	for {
-		logrus.Infoln(node.id.Val, id, tmp.Pre.Code, tmp.Slf.Code)
-		flag := Contain(id, tmp.Pre.Code+1, tmp.Slf.Code)
-		if flag {
-			break
-		}
-		node.RemoteCall(tmp.Suc.Val, "Node.GetInfo", struct{}{}, &tmp)
-	}
-	logrus.Infof("finish")
-	*reply = tmp.Slf.Val
-	return nil
-}
-
 func (node *Node) PreLink(x Smpl, reply *struct{}) error {
 	node.routeLock.Lock()
 	node.pre = x.Slf
@@ -231,25 +304,37 @@ func (node *Node) SucLink(x Smpl, reply *struct{}) error {
 
 func (node *Node) Join(addr string) bool {
 	logrus.Infof("Join %s", addr)
-	var tmp1 Smpl
-	var s string
+	// var tmp1 Smpl
+	// var s string
+	// for {
+	// 	node.RemoteCall(addr, "Node.FindSuc", node.id.Code, &s)
+	// 	node.RemoteCall(s, "Node.GetInfo", struct{}{}, &tmp1)
+	// 	if tmp1.Slf.Code != node.id.Code {
+	// 		break
+	// 	}
+	// 	node.id.Code++
+	// }
+	// logrus.Info("suc:", s, ";")
+	// node.routeLock.Lock()
+	// node.suc = tmp1.Slf
+	// node.pre = tmp1.Pre
+	// node.data = make(map[MyString]string)
+	// node.RemoteCall(node.pre.Val, "Node.SucLink", Smpl{Slf: node.id}, nil)
+	// node.RemoteCall(node.suc.Val, "Node.PreLink", Smpl{Slf: node.id}, nil)
+	// node.RemoteCall(node.suc.Val, "Node.MoveData", node.id.Code, &node.data)
+	// node.routeLock.Unlock()
+	node.routeLock.Lock()
+	node.pre.Val = ""
 	for {
-		node.RemoteCall(addr, "Node.FindSuc", node.id.Code, &s)
-		node.RemoteCall(s, "Node.GetInfo", struct{}{}, &tmp1)
-		if tmp1.Slf.Code != node.id.Code {
+		node.RemoteCall(addr, "Node.FindSuc", node.id.Code, &node.suc)
+		if node.suc.Code == node.id.Code {
+			node.id.Code++
+		} else {
 			break
 		}
-		node.id.Code++
 	}
-	logrus.Info("suc:", s, ";")
-	node.routeLock.Lock()
-	node.suc = tmp1.Slf
-	node.pre = tmp1.Pre
-	node.data = make(map[MyString]string)
-	node.RemoteCall(node.pre.Val, "Node.SucLink", Smpl{Slf: node.id}, nil)
-	node.RemoteCall(node.suc.Val, "Node.PreLink", Smpl{Slf: node.id}, nil)
-	node.RemoteCall(node.suc.Val, "Node.MoveData", node.id.Code, &node.data)
 	node.routeLock.Unlock()
+	go node.period()
 	logrus.Infof("Join finish")
 	return true
 }
@@ -288,29 +373,29 @@ func (node *Node) DeletePair(key MyString, reply *bool) error {
 func (node *Node) Put(key string, value string) bool {
 	logrus.Infof("Put %s %s", key, value)
 	tmp := Pair{MyString{key, hashCode(key)}, value}
-	var x string
+	var x MyString
 	node.FindSuc(tmp.Key.Code, &x)
-	node.RemoteCall(x, "Node.PutPair", tmp, nil)
+	node.RemoteCall(x.Val, "Node.PutPair", tmp, nil)
 	return true
 }
 
 func (node *Node) Get(key string) (bool, string) {
 	logrus.Infof("Get %s", key)
 	var tmp Prply
-	var x string
+	var x MyString
 	k := MyString{key, hashCode(key)}
 	node.FindSuc(k.Code, &x)
-	node.RemoteCall(x, "Node.GetPair", k, &tmp)
+	node.RemoteCall(x.Val, "Node.GetPair", k, &tmp)
 	return tmp.Ok, tmp.Val
 }
 
 func (node *Node) Delete(key string) bool {
 	logrus.Infof("Delete %s", key)
 	k := MyString{key, hashCode(key)}
-	var x string
+	var x MyString
 	node.FindSuc(k.Code, &x)
 	var tmp bool
-	node.RemoteCall(x, "Node.DeletePair", k, &tmp)
+	node.RemoteCall(x.Val, "Node.DeletePair", k, &tmp)
 	return tmp
 }
 
@@ -324,17 +409,17 @@ func (node *Node) RecvData(d map[MyString]string, _ *struct{}) error {
 }
 
 func (node *Node) Quit() {
+	defer node.StopRPCServer()
 	logrus.Infof("Quit %s", node.id.Val)
 	if !node.online {
 		logrus.Infof("Already quit")
 		return
 	}
-	node.routeLock.Lock()
-	node.RemoteCall(node.suc.Val, "Node.RecvData", node.data, nil)
-	node.RemoteCall(node.suc.Val, "Node.PreLink", Smpl{Slf: node.pre}, nil)
-	node.RemoteCall(node.pre.Val, "Node.SucLink", Smpl{Slf: node.suc}, nil)
-	node.routeLock.Unlock()
-	node.StopRPCServer()
+	suc := node.LiveSuc()
+	if suc == node.id {
+		return
+	}
+	node.RemoteCall(suc.Val, "Node.RecvData", node.data, nil)
 }
 
 func (node *Node) ForceQuit() {
