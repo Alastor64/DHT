@@ -51,8 +51,8 @@ func hashCode(s string) hint {
 	return val
 }
 
-type MyKey struct {
-	Key  string
+type MyString struct {
+	Val  string
 	Code hint
 }
 
@@ -60,33 +60,27 @@ type MyKey struct {
 // Note: It must be exported (i.e., Capitalized) so that it can be
 // used as the argument type of RPC methods.
 type Pair struct {
-	Key   MyKey
+	Key   MyString
 	Value string
 }
 
-type Info struct {
-	Addr    string // address and port number of the node, e.g., "localhost:1234"
-	Code    hint
-	SucAddr string
-	SucCode hint
-	PreAddr string
-	PreCode hint
+type Smpl struct {
+	Slf MyString
+	Suc MyString
+	Pre MyString
 }
 
 type Node struct {
-	Addr   string // address and port number of the node, e.g., "localhost:1234"
-	Code   hint
+	id     MyString
 	online bool
 
 	listener  net.Listener
 	server    *rpc.Server
-	data      map[MyKey]string
+	data      map[MyString]string
 	dataLock  sync.RWMutex
 	routeLock sync.RWMutex
-	SucAddr   string
-	SucCode   hint
-	PreAddr   string
-	PreCode   hint
+	suc       MyString
+	pre       MyString
 }
 
 // Initialize a node.
@@ -98,7 +92,7 @@ func (node *Node) Init(addr string) {
 	node.PreAddr = addr
 	node.SucCode = node.Code
 	node.PreCode = node.Code
-	node.data = make(map[MyKey]string)
+	node.data = make(map[MyString]string)
 }
 
 func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
@@ -167,7 +161,7 @@ func (node *Node) RemoteCall(addr string, method string, args interface{}, reply
 // The empty struct "{}" is used to represent "void" in Go.
 //保证reply是空map
 //code是n的前驱
-func (n *Node) MoveData(code hint, reply *map[MyKey]string) error {
+func (n *Node) MoveData(code hint, reply *map[MyString]string) error {
 	n.dataLock.Lock()
 	for k, v := range n.data {
 		if !Contain(k.Code, code+1, n.Code) {
@@ -196,14 +190,14 @@ func (node *Node) Create() {
 	logrus.Info("Create")
 }
 
-func (node *Node) Inform() Info {
+func (node *Node) Inform() Smpl {
 	node.routeLock.RLock()
-	tmp := Info{node.Addr, node.Code, node.SucAddr, node.SucCode, node.PreAddr, node.PreCode}
+	tmp := Smpl{node.Addr, node.Code, node.SucAddr, node.SucCode, node.PreAddr, node.PreCode}
 	node.routeLock.RUnlock()
 	return tmp
 }
 
-func (node *Node) GetInfo(_ struct{}, reply *Info) error {
+func (node *Node) GetInfo(_ struct{}, reply *Smpl) error {
 	*reply = node.Inform()
 	return nil
 }
@@ -222,14 +216,14 @@ func (node *Node) FindSuc(id hint, reply *string) error {
 	*reply = tmp.Addr
 	return nil
 }
-func (node *Node) PreLink(x Info, reply *struct{}) error {
+func (node *Node) PreLink(x Smpl, reply *struct{}) error {
 	node.routeLock.Lock()
 	node.PreAddr = x.Addr
 	node.PreCode = x.Code
 	node.routeLock.Unlock()
 	return nil
 }
-func (node *Node) SucLink(x Info, reply *struct{}) error {
+func (node *Node) SucLink(x Smpl, reply *struct{}) error {
 	node.routeLock.Lock()
 	node.SucAddr = x.Addr
 	node.SucCode = x.Code
@@ -238,7 +232,7 @@ func (node *Node) SucLink(x Info, reply *struct{}) error {
 }
 func (node *Node) Join(addr string) bool {
 	logrus.Infof("Join %s", addr)
-	var tmp1, tmp2 Info
+	var tmp1, tmp2 Smpl
 	var s string
 	for {
 		node.RemoteCall(addr, "Node.FindSuc", node.Code, &s)
@@ -255,9 +249,9 @@ func (node *Node) Join(addr string) bool {
 	node.RemoteCall(node.PreAddr, "Node.GetInfo", struct{}{}, &tmp2)
 	node.SucCode = tmp1.Code
 	node.PreCode = tmp2.Code
-	node.data = make(map[MyKey]string)
-	node.RemoteCall(node.PreAddr, "Node.SucLink", Info{Addr: node.Addr, Code: node.Code}, nil)
-	node.RemoteCall(node.SucAddr, "Node.PreLink", Info{Addr: node.Addr, Code: node.Code}, nil)
+	node.data = make(map[MyString]string)
+	node.RemoteCall(node.PreAddr, "Node.SucLink", Smpl{Addr: node.Addr, Code: node.Code}, nil)
+	node.RemoteCall(node.SucAddr, "Node.PreLink", Smpl{Addr: node.Addr, Code: node.Code}, nil)
 	node.RemoteCall(node.SucAddr, "Node.MoveData", node.Code, &node.data)
 	node.routeLock.Unlock()
 	logrus.Infof("Join finish")
@@ -276,7 +270,7 @@ type Prply struct {
 	Val string
 }
 
-func (node *Node) GetPair(key MyKey, reply *Prply) error {
+func (node *Node) GetPair(key MyString, reply *Prply) error {
 	node.dataLock.RLock()
 	v, o := node.data[key]
 	*reply = Prply{o, v}
@@ -284,7 +278,7 @@ func (node *Node) GetPair(key MyKey, reply *Prply) error {
 	return nil
 }
 
-func (node *Node) DeletePair(key MyKey, reply *bool) error {
+func (node *Node) DeletePair(key MyString, reply *bool) error {
 	node.dataLock.Lock()
 	_, ok := node.data[key]
 	if ok {
@@ -297,7 +291,7 @@ func (node *Node) DeletePair(key MyKey, reply *bool) error {
 
 func (node *Node) Put(key string, value string) bool {
 	logrus.Infof("Put %s %s", key, value)
-	tmp := Pair{MyKey{key, hashCode(key)}, value}
+	tmp := Pair{MyString{key, hashCode(key)}, value}
 	var x string
 	node.FindSuc(tmp.Key.Code, &x)
 	node.RemoteCall(x, "Node.PutPair", tmp, nil)
@@ -308,7 +302,7 @@ func (node *Node) Get(key string) (bool, string) {
 	logrus.Infof("Get %s", key)
 	var tmp Prply
 	var x string
-	k := MyKey{key, hashCode(key)}
+	k := MyString{key, hashCode(key)}
 	node.FindSuc(k.Code, &x)
 	node.RemoteCall(x, "Node.GetPair", k, &tmp)
 	return tmp.Ok, tmp.Val
@@ -316,7 +310,7 @@ func (node *Node) Get(key string) (bool, string) {
 
 func (node *Node) Delete(key string) bool {
 	logrus.Infof("Delete %s", key)
-	k := MyKey{key, hashCode(key)}
+	k := MyString{key, hashCode(key)}
 	var x string
 	node.FindSuc(k.Code, &x)
 	var tmp bool
@@ -324,7 +318,7 @@ func (node *Node) Delete(key string) bool {
 	return tmp
 }
 
-func (node *Node) RecvData(d map[MyKey]string, _ *struct{}) error {
+func (node *Node) RecvData(d map[MyString]string, _ *struct{}) error {
 	node.dataLock.Lock()
 	for k, v := range d {
 		node.data[k] = v
@@ -340,7 +334,7 @@ func (node *Node) Quit() {
 		return
 	}
 	node.RemoteCall(node.SucAddr, "Node.RecvData", node.data, nil)
-	var tmp1, tmp2 Info
+	var tmp1, tmp2 Smpl
 	node.routeLock.Lock()
 	tmp1.Code = node.PreCode
 	tmp1.Addr = node.PreAddr
