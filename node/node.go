@@ -66,33 +66,38 @@ type Pair struct {
 
 type Info struct {
 	Addr    string // address and port number of the node, e.g., "localhost:1234"
+	Code    hint
 	SucAddr string
 	SucCode hint
 	PreAddr string
 	PreCode hint
-	Code    hint
 }
 
 type Node struct {
-	info   Info
+	Addr   string // address and port number of the node, e.g., "localhost:1234"
+	Code   hint
 	online bool
 
-	listener net.Listener
-	server   *rpc.Server
-	data     map[MyKey]string
-	dataLock sync.RWMutex
-	relaLock sync.RWMutex
+	listener  net.Listener
+	server    *rpc.Server
+	data      map[MyKey]string
+	dataLock  sync.RWMutex
+	routeLock sync.RWMutex
+	SucAddr   string
+	SucCode   hint
+	PreAddr   string
+	PreCode   hint
 }
 
 // Initialize a node.
 // Addr is the address and port number of the node, e.g., "localhost:1234".
 func (node *Node) Init(addr string) {
-	node.info.Addr = addr
-	node.info.SucAddr = addr
-	node.info.PreAddr = addr
-	node.info.Code = hashCode(addr)
-	node.info.PreCode = node.info.Code
-	node.info.SucCode = node.info.Code
+	node.Addr = addr
+	node.Code = hashCode(addr)
+	node.SucAddr = addr
+	node.PreAddr = addr
+	node.SucCode = node.Code
+	node.PreCode = node.Code
 	node.data = make(map[MyKey]string)
 }
 
@@ -100,7 +105,7 @@ func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
 	node.server = rpc.NewServer()
 	node.server.Register(node)
 	var err error
-	node.listener, err = net.Listen("tcp", node.info.Addr)
+	node.listener, err = net.Listen("tcp", node.Addr)
 	wg.Done()
 	if err != nil {
 		logrus.Fatal("listen error: ", err)
@@ -128,7 +133,7 @@ func (node *Node) StopRPCServer() {
 // Re-connect to the client every time can be slow. You can use connection pool to improve the performance.
 func (node *Node) RemoteCall(addr string, method string, args interface{}, reply interface{}) error {
 	if method != "Node.Ping" {
-		logrus.Infof("[%s] RemoteCall %s %s %v", node.info.Addr, addr, method, args)
+		logrus.Infof("[%s] RemoteCall %s %s %v", node.Addr, addr, method, args)
 	}
 	// Note: Here we use DialTimeout to set a timeout of 10 seconds.
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
@@ -165,7 +170,7 @@ func (node *Node) RemoteCall(addr string, method string, args interface{}, reply
 func (n *Node) MoveData(code hint, reply *map[MyKey]string) error {
 	n.dataLock.Lock()
 	for k, v := range n.data {
-		if !Contain(k.Code, code+1, n.info.Code) {
+		if !Contain(k.Code, code+1, n.Code) {
 			(*reply)[k] = v
 			delete(n.data, k)
 		}
@@ -191,15 +196,22 @@ func (node *Node) Create() {
 	logrus.Info("Create")
 }
 
+func (node *Node) Inform() Info {
+	node.routeLock.RLock()
+	tmp := Info{node.Addr, node.Code, node.SucAddr, node.SucCode, node.PreAddr, node.PreCode}
+	node.routeLock.RUnlock()
+	return tmp
+}
+
 func (node *Node) GetInfo(_ struct{}, reply *Info) error {
-	*reply = node.info
+	*reply = node.Inform()
 	return nil
 }
 
 func (node *Node) FindSuc(id hint, reply *string) error {
-	tmp := node.info
+	tmp := node.Inform()
 	for {
-		logrus.Infoln(node.info.Addr, id, tmp.PreCode, tmp.Code)
+		logrus.Infoln(node.Addr, id, tmp.PreCode, tmp.Code)
 		flag := Contain(id, tmp.PreCode+1, tmp.Code)
 		if flag {
 			break
@@ -211,35 +223,43 @@ func (node *Node) FindSuc(id hint, reply *string) error {
 	return nil
 }
 func (node *Node) PreLink(x Info, reply *struct{}) error {
-	node.info.PreAddr = x.Addr
-	node.info.PreCode = x.Code
+	node.routeLock.Lock()
+	node.PreAddr = x.Addr
+	node.PreCode = x.Code
+	node.routeLock.Unlock()
 	return nil
 }
 func (node *Node) SucLink(x Info, reply *struct{}) error {
-	node.info.SucAddr = x.Addr
-	node.info.SucCode = x.Code
+	node.routeLock.Lock()
+	node.SucAddr = x.Addr
+	node.SucCode = x.Code
+	node.routeLock.Unlock()
 	return nil
 }
 func (node *Node) Join(addr string) bool {
 	logrus.Infof("Join %s", addr)
 	var tmp1, tmp2 Info
+	var s string
 	for {
-		node.RemoteCall(addr, "Node.FindSuc", node.info.Code, &node.info.SucAddr)
-		node.RemoteCall(node.info.SucAddr, "Node.GetInfo", struct{}{}, &tmp1)
-		if tmp1.Code != node.info.Code {
+		node.RemoteCall(addr, "Node.FindSuc", node.Code, &s)
+		node.RemoteCall(s, "Node.GetInfo", struct{}{}, &tmp1)
+		if tmp1.Code != node.Code {
 			break
 		}
-		node.info.Code++
+		node.Code++
 	}
-	logrus.Info("suc:", tmp1.Addr, tmp1.PreAddr, ";")
-	node.info.PreAddr = tmp1.PreAddr
-	node.RemoteCall(node.info.PreAddr, "Node.GetInfo", struct{}{}, &tmp2)
-	node.info.SucCode = tmp1.Code
-	node.info.PreCode = tmp2.Code
+	logrus.Info("suc:", s, ";")
+	node.routeLock.Lock()
+	node.SucAddr = tmp1.Addr
+	node.PreAddr = tmp1.PreAddr
+	node.RemoteCall(node.PreAddr, "Node.GetInfo", struct{}{}, &tmp2)
+	node.SucCode = tmp1.Code
+	node.PreCode = tmp2.Code
 	node.data = make(map[MyKey]string)
-	node.RemoteCall(node.info.SucAddr, "Node.MoveData", node.info.Code, &node.data)
-	node.RemoteCall(node.info.PreAddr, "Node.SucLink", node.info, nil)
-	node.RemoteCall(node.info.SucAddr, "Node.PreLink", node.info, nil)
+	node.RemoteCall(node.PreAddr, "Node.SucLink", Info{Addr: node.Addr, Code: node.Code}, nil)
+	node.RemoteCall(node.SucAddr, "Node.PreLink", Info{Addr: node.Addr, Code: node.Code}, nil)
+	node.RemoteCall(node.SucAddr, "Node.MoveData", node.Code, &node.data)
+	node.routeLock.Unlock()
 	logrus.Infof("Join finish")
 	return true
 }
@@ -314,19 +334,21 @@ func (node *Node) RecvData(d map[MyKey]string, _ *struct{}) error {
 }
 
 func (node *Node) Quit() {
-	logrus.Infof("Quit %s", node.info.Addr)
+	logrus.Infof("Quit %s", node.Addr)
 	if !node.online {
 		logrus.Infof("Already quit")
 		return
 	}
-	node.RemoteCall(node.info.SucAddr, "Node.RecvData", node.data, nil)
+	node.RemoteCall(node.SucAddr, "Node.RecvData", node.data, nil)
 	var tmp1, tmp2 Info
-	tmp1.Code = node.info.PreCode
-	tmp1.Addr = node.info.PreAddr
-	tmp2.Code = node.info.SucCode
-	tmp2.Addr = node.info.SucAddr
-	node.RemoteCall(node.info.SucAddr, "Node.PreLink", tmp1, nil)
-	node.RemoteCall(node.info.PreAddr, "Node.SucLink", tmp2, nil)
+	node.routeLock.Lock()
+	tmp1.Code = node.PreCode
+	tmp1.Addr = node.PreAddr
+	tmp2.Code = node.SucCode
+	tmp2.Addr = node.SucAddr
+	node.routeLock.Unlock()
+	node.RemoteCall(node.SucAddr, "Node.PreLink", tmp1, nil)
+	node.RemoteCall(node.PreAddr, "Node.SucLink", tmp2, nil)
 	node.StopRPCServer()
 }
 
