@@ -315,6 +315,10 @@ func (node *Node) RecvData(d map[MyKey]string, _ *struct{}) error {
 
 func (node *Node) Quit() {
 	logrus.Infof("Quit %s", node.info.Addr)
+	if !node.online {
+		logrus.Infof("Already quit")
+		return
+	}
 	node.RemoteCall(node.info.SucAddr, "Node.RecvData", node.data, nil)
 	var tmp1, tmp2 Info
 	tmp1.Code = node.info.PreCode
