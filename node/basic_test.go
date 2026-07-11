@@ -63,6 +63,7 @@ func basicTest() (bool, int, int) {
 
 			time.Sleep(testutil.BasicTestJoinQuitSleepTime)
 			nextJoinNode++
+			nodes[nodesInNetwork[0]].Dis(len(nodesInNetwork) + 1)
 		}
 		joinInfo.Finish(&basicFailedCnt, &basicTotalCnt)
 
