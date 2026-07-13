@@ -70,7 +70,14 @@ type Smpl struct {
 	Suc MyString
 	Pre MyString
 }
-
+type BUString struct {
+	Origin MyString
+	Key    MyString
+}
+type BUpair struct {
+	Key BUString
+	Val string
+}
 type Node struct {
 	id     MyString
 	online bool
@@ -79,12 +86,16 @@ type Node struct {
 	server     *rpc.Server
 	data       map[MyString]string
 	dataLock   sync.RWMutex
+	backup     map[BUString]string
+	backuplock sync.RWMutex
 	routeLock  sync.RWMutex
 	fingerLock sync.RWMutex
 	suc        MyString
 	pre        MyString
 	finger     []MyString
 	fix_cnt    hint
+	periodLock sync.RWMutex
+	ifperiod   bool
 }
 
 // Initialize a node.
@@ -94,6 +105,7 @@ func (node *Node) Init(addr string) {
 	node.id.Code = hashCode(addr)
 	node.suc = node.id
 	node.pre = node.id
+	node.backup = make(map[BUString]string, 0)
 	node.data = make(map[MyString]string)
 	node.finger = make([]MyString, m)
 }
@@ -137,14 +149,14 @@ func (node *Node) RemoteCall(addr string, method string, args interface{}, reply
 	// Note: Here we use DialTimeout to set a timeout of 10 seconds.
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
-		// logrus.Error("dialing: ", err)
+		logrus.Error("dialing: ", err)
 		return err
 	}
 	client := rpc.NewClient(conn)
 	defer client.Close()
 	err = client.Call(method, args, reply)
 	if err != nil {
-		// logrus.Error("RemoteCall error: ", err)
+		logrus.Error("RemoteCall error: ", err)
 		return err
 	}
 	return nil
@@ -167,15 +179,24 @@ func (node *Node) RemoteCall(addr string, method string, args interface{}, reply
 //保证reply是空map
 //code是n的前驱
 func (n *Node) SendData(x MyString, ifall bool) {
+	logrus.Info("Sending : ", x.Code, "   ", n.id.Code, " if all:", ifall)
+	flag := true
 	n.dataLock.RLock()
-	tmp := n.data
+	tmp := make(map[MyString]string, 0)
+	for k, v := range n.data {
+		tmp[k] = v
+	}
 	n.dataLock.RUnlock()
 	var zz bool
 	for k, v := range tmp {
 		if ifall || !Contain(k.Code, x.Code+1, n.id.Code) {
+			flag = false
 			n.RemoteCall(x.Val, "Node.PutPair", Pair{k, v}, nil, true)
 			n.DeletePair(k, &zz)
 		}
+	}
+	if flag {
+		logrus.Info("useless send!")
 	}
 }
 
@@ -231,12 +252,25 @@ func (node *Node) GetPre(_ struct{}, reply *MyString) error {
 func (node *Node) Notify(x MyString, reply *struct{}) error {
 	var tmp MyString
 	node.GetPre(struct{}{}, &tmp)
+	if x.Val == tmp.Val {
+		return nil
+	}
 	if tmp.Val == "" || (tmp.Code+1 != node.id.Code && Contain(x.Code, tmp.Code+1, node.id.Code-1)) {
 		node.routeLock.Lock()
 		node.pre = x
 		node.routeLock.Unlock()
 		node.SendData(x, false)
 	}
+	return nil
+}
+func (node *Node) ClearBackup(Origin MyString, reply *struct{}) error {
+	node.backuplock.Lock()
+	for k, _ := range node.backup {
+		if k.Origin == Origin {
+			delete(node.backup, k)
+		}
+	}
+	node.backuplock.Unlock()
 	return nil
 }
 func (node *Node) Stabilize() {
@@ -248,6 +282,7 @@ func (node *Node) Stabilize() {
 		logrus.Info(node.id, " suc from ", node.suc, " to ", pn)
 		node.suc = pn
 		node.routeLock.Unlock()
+
 	}
 	node.RemoteCall(sn.Val, "Node.Notify", node.id, nil, false)
 }
@@ -279,8 +314,12 @@ func (node *Node) FindSuc(id hint, reply *MyString) error {
 	now := node.id
 	suc := node.LiveSuc()
 	for !Contain(id, now.Code+1, suc.Code) {
+		tmp := now
 		node.RemoteCall(now.Val, "Node.FingerPre", id, &now, false)
 		node.RemoteCall(now.Val, "Node.GetLiveSuc", struct{}{}, &suc, false)
+		if now == tmp {
+			now = suc
+		}
 		if now == node.id {
 			break
 		}
@@ -300,11 +339,14 @@ func (node *Node) fixFinger() {
 	}
 }
 func (node *Node) period() {
-	for node.online {
+	node.ifperiod = true
+	node.periodLock.Lock()
+	for node.ifperiod {
 		node.Stabilize()
 		node.fixFinger()
 		time.Sleep(ticktime)
 	}
+	node.periodLock.Unlock()
 }
 func (node *Node) Run(wg *sync.WaitGroup) {
 	node.online = true
@@ -351,6 +393,20 @@ func (node *Node) PutPair(pair Pair, _ *struct{}) error {
 	node.dataLock.Lock()
 	node.data[pair.Key] = pair.Value
 	node.dataLock.Unlock()
+	node.LiveSuc()
+	node.routeLock.RLock()
+	tmp := node.suc
+	node.routeLock.RUnlock()
+	if tmp != node.id {
+		p := BUpair{BUString{Key: pair.Key, Origin: node.id}, pair.Value}
+		node.RemoteCall(tmp.Val, "Node.PutBackup", p, nil, false)
+	}
+	return nil
+}
+func (node *Node) PutBackup(pair BUpair, _ *struct{}) error {
+	node.backuplock.Lock()
+	node.backup[pair.Key] = pair.Val
+	node.backuplock.Unlock()
 	return nil
 }
 
@@ -375,6 +431,22 @@ func (node *Node) DeletePair(key MyString, reply *bool) error {
 	}
 	*reply = ok
 	node.dataLock.Unlock()
+	node.routeLock.RLock()
+	tmp := node.suc
+	node.routeLock.RUnlock()
+	if tmp != node.id {
+		k := BUString{Key: key, Origin: node.id}
+		node.RemoteCall(tmp.Val, "Node.DeleteBackup", k, nil, false)
+	}
+	return nil
+}
+func (node *Node) DeleteBackup(key BUString, reply *struct{}) error {
+	node.backuplock.Lock()
+	_, ok := node.backup[key]
+	if ok {
+		delete(node.backup, key)
+	}
+	node.backuplock.Unlock()
 	return nil
 }
 
@@ -407,15 +479,6 @@ func (node *Node) Delete(key string) bool {
 	return tmp
 }
 
-func (node *Node) RecvData(d map[MyString]string, _ *struct{}) error {
-	node.dataLock.Lock()
-	for k, v := range d {
-		node.data[k] = v
-	}
-	node.dataLock.Unlock()
-	return nil
-}
-
 func (node *Node) Quit() {
 	defer node.StopRPCServer()
 	logrus.Infof("Quit %s", node.id.Val)
@@ -427,6 +490,9 @@ func (node *Node) Quit() {
 	if suc == node.id {
 		return
 	}
+	node.ifperiod = false
+	node.periodLock.Lock()
+	defer node.periodLock.Unlock()
 	node.SendData(suc, true)
 	var pre MyString
 	node.GetPre(struct{}{}, &pre)
