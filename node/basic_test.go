@@ -61,7 +61,7 @@ func basicTest() (bool, int, int) {
 			}
 			nodesInNetwork = append(nodesInNetwork, nextJoinNode)
 
-			time.Sleep(testutil.BasicTestJoinQuitSleepTime)
+			time.Sleep(15 * testutil.BasicTestJoinQuitSleepTime)
 			nextJoinNode++
 			nodes[nodesInNetwork[0]].Dis(len(nodesInNetwork) + 1)
 		}
@@ -138,7 +138,9 @@ func basicTest() (bool, int, int) {
 			nodes[nodesInNetwork[idxInArray]].Quit()
 			nodesInNetwork = testutil.RemoveFromArray(nodesInNetwork, idxInArray)
 
-			time.Sleep(testutil.BasicTestJoinQuitSleepTime)
+			time.Sleep(15 * testutil.BasicTestJoinQuitSleepTime)
+			nodes[nodesInNetwork[0]].Dis(len(nodesInNetwork) + 1)
+
 		}
 		testutil.Green.Printf("Quit (round %d) passed.\n", round)
 		time.Sleep(testutil.BasicTestAfterJoinQuitSleepTime)

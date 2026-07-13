@@ -130,21 +130,21 @@ func (node *Node) StopRPCServer() {
 // Re-connect to the client every time can be slow. You can use connection pool to improve the performance.
 func (node *Node) RemoteCall(addr string, method string, args interface{}, reply interface{}, iflog bool) error {
 	if method != "Node.Ping" {
-		if iflog {
+		if iflog && method == "Node.Display" {
 			logrus.Infof("[%s] RemoteCall %s %s %v", node.id.Val, addr, method, args)
 		}
 	}
 	// Note: Here we use DialTimeout to set a timeout of 10 seconds.
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
-		logrus.Error("dialing: ", err)
+		// logrus.Error("dialing: ", err)
 		return err
 	}
 	client := rpc.NewClient(conn)
 	defer client.Close()
 	err = client.Call(method, args, reply)
 	if err != nil {
-		logrus.Error("RemoteCall error: ", err)
+		// logrus.Error("RemoteCall error: ", err)
 		return err
 	}
 	return nil
@@ -208,11 +208,23 @@ func (node *Node) LiveSuc() MyString {
 	return node.id
 }
 func (node *Node) GetPre(_ struct{}, reply *MyString) error {
-	*reply = node.pre
+	node.routeLock.RLock()
+	if node.ping(node.pre.Val) {
+		*reply = node.pre
+		node.routeLock.RUnlock()
+	} else {
+		node.routeLock.RUnlock()
+		node.routeLock.Lock()
+		reply.Val = ""
+		node.pre.Val = ""
+		node.routeLock.Unlock()
+	}
 	return nil
 }
 func (node *Node) Notify(x MyString, reply *struct{}) error {
-	if node.pre.Val == "" || (node.pre.Code+1 != node.id.Code && Contain(x.Code, node.pre.Code+1, node.id.Code-1)) {
+	var tmp MyString
+	node.GetPre(struct{}{}, &tmp)
+	if tmp.Val == "" || (tmp.Code+1 != node.id.Code && Contain(x.Code, tmp.Code+1, node.id.Code-1)) {
 		node.routeLock.Lock()
 		node.pre = x
 		node.routeLock.Unlock()
