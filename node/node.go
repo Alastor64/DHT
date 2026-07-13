@@ -32,7 +32,7 @@ type hint = uint8
 const (
 	m        = hint(8)
 	base     = 37 //hint(269)
-	ticktime = 20 * time.Millisecond
+	ticktime = 7 * time.Millisecond
 )
 
 func Contain(x, l, r hint) bool {
@@ -166,16 +166,17 @@ func (node *Node) RemoteCall(addr string, method string, args interface{}, reply
 // The empty struct "{}" is used to represent "void" in Go.
 //保证reply是空map
 //code是n的前驱
-func (n *Node) MoveData(code hint, reply *map[MyString]string) error {
-	n.dataLock.Lock()
-	for k, v := range n.data {
-		if !Contain(k.Code, code+1, n.id.Code) {
-			(*reply)[k] = v
-			delete(n.data, k)
+func (n *Node) SendData(x MyString, ifall bool) {
+	n.dataLock.RLock()
+	tmp := n.data
+	n.dataLock.RUnlock()
+	var zz bool
+	for k, v := range tmp {
+		if ifall || !Contain(k.Code, x.Code+1, n.id.Code) {
+			n.RemoteCall(x.Val, "Node.PutPair", Pair{k, v}, nil, true)
+			n.DeletePair(k, &zz)
 		}
 	}
-	n.dataLock.Unlock()
-	return nil
 }
 
 func (node *Node) Ping(_ struct{}, _ *struct{}) error {
@@ -195,20 +196,26 @@ func (node *Node) LiveSuc() MyString {
 	if node.ping(tmp.Val) {
 		return tmp
 	}
+	tmp = node.id
 	node.fingerLock.RLock()
-	defer node.fingerLock.RUnlock()
 	for i := hint(0); i < m; i++ {
-		if node.ping(node.finger[i].Val) {
-			node.routeLock.Lock()
-			node.suc = node.finger[i]
-			node.routeLock.Unlock()
-			return node.finger[i]
+		if Contain(node.finger[i].Code, node.id.Code, tmp.Code-1) && node.ping(node.finger[i].Val) {
+			tmp = node.finger[i]
 		}
 	}
-	return node.id
+	node.fingerLock.RUnlock()
+	node.routeLock.Lock()
+	node.suc = tmp
+	node.routeLock.Unlock()
+	return node.suc
 }
 func (node *Node) GetPre(_ struct{}, reply *MyString) error {
 	node.routeLock.RLock()
+	if node.pre.Val == "" {
+		node.routeLock.RUnlock()
+		reply.Val = ""
+		return nil
+	}
 	if node.ping(node.pre.Val) {
 		*reply = node.pre
 		node.routeLock.RUnlock()
@@ -228,6 +235,7 @@ func (node *Node) Notify(x MyString, reply *struct{}) error {
 		node.routeLock.Lock()
 		node.pre = x
 		node.routeLock.Unlock()
+		node.SendData(x, false)
 	}
 	return nil
 }
@@ -302,7 +310,18 @@ func (node *Node) Run(wg *sync.WaitGroup) {
 	node.online = true
 	go node.RunRPCServer(wg)
 }
-
+func (node *Node) SetSuc(x MyString, reply *struct{}) error {
+	node.routeLock.Lock()
+	node.suc = x
+	node.routeLock.Unlock()
+	return nil
+}
+func (node *Node) SetPre(x MyString, reply *struct{}) error {
+	node.routeLock.Lock()
+	node.pre = x
+	node.routeLock.Unlock()
+	return nil
+}
 func (node *Node) Create() {
 	logrus.Info("Create")
 	go node.period()
@@ -320,7 +339,9 @@ func (node *Node) Join(addr string) bool {
 		}
 	}
 	node.RemoteCall(node.suc.Val, "Node.GetPre", struct{}{}, &node.pre, true)
+	suc := node.suc
 	node.routeLock.Unlock()
+	node.RemoteCall(suc.Val, "Node.Notify", node.id, nil, true)
 	go node.period()
 	logrus.Infof("Join finish")
 	return true
@@ -406,7 +427,13 @@ func (node *Node) Quit() {
 	if suc == node.id {
 		return
 	}
-	node.RemoteCall(suc.Val, "Node.RecvData", node.data, nil, true)
+	node.SendData(suc, true)
+	var pre MyString
+	node.GetPre(struct{}{}, &pre)
+	node.RemoteCall(suc.Val, "Node.SetPre", pre, nil, true)
+	if node.ping(pre.Val) {
+		node.RemoteCall(pre.Val, "Node.SetSuc", suc, nil, true)
+	}
 }
 
 func (node *Node) ForceQuit() {

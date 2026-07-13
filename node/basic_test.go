@@ -10,6 +10,10 @@ import (
 	"dht/testutil"
 )
 
+const (
+	zz = 1
+)
+
 func basicTest() (bool, int, int) {
 	basicFailedCnt, basicTotalCnt, panicked := 0, 0, false
 
@@ -61,7 +65,7 @@ func basicTest() (bool, int, int) {
 			}
 			nodesInNetwork = append(nodesInNetwork, nextJoinNode)
 
-			time.Sleep(15 * testutil.BasicTestJoinQuitSleepTime)
+			time.Sleep(zz * testutil.BasicTestJoinQuitSleepTime)
 			nextJoinNode++
 			nodes[nodesInNetwork[0]].Dis(len(nodesInNetwork) + 1)
 		}
@@ -138,7 +142,7 @@ func basicTest() (bool, int, int) {
 			nodes[nodesInNetwork[idxInArray]].Quit()
 			nodesInNetwork = testutil.RemoveFromArray(nodesInNetwork, idxInArray)
 
-			time.Sleep(15 * testutil.BasicTestJoinQuitSleepTime)
+			time.Sleep(zz * testutil.BasicTestJoinQuitSleepTime)
 			nodes[nodesInNetwork[0]].Dis(len(nodesInNetwork) + 1)
 
 		}

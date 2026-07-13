@@ -3,3 +3,4 @@ dht
 doc/
 my/
 README.md
+*.out
