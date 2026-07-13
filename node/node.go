@@ -33,6 +33,7 @@ const (
 	m        = hint(8)
 	base     = 37 //hint(269)
 	ticktime = 20 * time.Millisecond
+	suclen   = 5
 )
 
 func Contain(x, l, r hint) bool {
@@ -81,7 +82,9 @@ type Node struct {
 	dataLock   sync.RWMutex
 	routeLock  sync.RWMutex
 	fingerLock sync.RWMutex
+	sucLock    sync.RWMutex
 	suc        MyString
+	sucList    []MyString
 	pre        MyString
 	finger     []MyString
 	fix_cnt    hint
@@ -95,6 +98,7 @@ func (node *Node) Init(addr string) {
 	node.suc = node.id
 	node.pre = node.id
 	node.data = make(map[MyString]string)
+	node.sucList = make([]MyString, suclen)
 	node.finger = make([]MyString, m)
 }
 
@@ -195,15 +199,16 @@ func (node *Node) LiveSuc() MyString {
 	if node.ping(tmp.Val) {
 		return tmp
 	}
+	sucs := make([]MyString, 0)
+	node.sucLock.RLock()
+	sucs = append(sucs, node.sucList...)
+	node.sucLock.RUnlock()
 	node.fingerLock.RLock()
-	defer node.fingerLock.RUnlock()
-	for i := hint(0); i < m; i++ {
-		if node.ping(node.finger[i].Val) {
-			node.routeLock.Lock()
-			node.suc = node.finger[i]
-			node.routeLock.Unlock()
-			return node.finger[i]
-		}
+	sucs = append(sucs, node.finger...)
+	node.fingerLock.RUnlock()
+	tmp = node.id
+	for i := 0; i < len(sucs); i++ {
+
 	}
 	return node.id
 }
