@@ -191,7 +191,7 @@ func (n *Node) SendData(x MyString, ifall bool) {
 	for k, v := range tmp {
 		if ifall || !Contain(k.Code, x.Code+1, n.id.Code) {
 			flag = false
-			n.RemoteCall(x.Val, "Node.PutPair", Pair{k, v}, nil, true)
+			n.RemoteCall(x.Val, "Node.PutPair", Pair{k, v}, nil, false)
 			n.DeletePair(k, &zz)
 		}
 	}
@@ -230,6 +230,16 @@ func (node *Node) LiveSuc() MyString {
 	node.routeLock.Unlock()
 	return node.suc
 }
+func (node *Node) eatBackup(Origin MyString) {
+	node.backuplock.Lock()
+	for k, v := range node.backup {
+		if k.Origin == Origin {
+			node.RemoteCall(node.id.Val, "Node.PutPair", Pair{Key: k.Key, Value: v}, nil, false)
+			delete(node.backup, k)
+		}
+	}
+	node.backuplock.Unlock()
+}
 func (node *Node) GetPre(_ struct{}, reply *MyString) error {
 	node.routeLock.RLock()
 	if node.pre.Val == "" {
@@ -241,6 +251,9 @@ func (node *Node) GetPre(_ struct{}, reply *MyString) error {
 		*reply = node.pre
 		node.routeLock.RUnlock()
 	} else {
+		if node.pre != node.id {
+			node.eatBackup(node.pre)
+		}
 		node.routeLock.RUnlock()
 		node.routeLock.Lock()
 		reply.Val = ""
@@ -273,16 +286,32 @@ func (node *Node) ClearBackup(Origin MyString, reply *struct{}) error {
 	node.backuplock.Unlock()
 	return nil
 }
+func (node *Node) promoteBackup() {
+	node.routeLock.RLock()
+	tmp := node.suc
+	node.routeLock.RUnlock()
+	if tmp == node.id {
+		return
+	}
+	logrus.Info(node.id, "promote backup to", tmp)
+	node.dataLock.RLock()
+	for k, v := range node.data {
+		p := BUpair{BUString{Key: k, Origin: node.id}, v}
+		node.RemoteCall(tmp.Val, "Node.PutBackup", p, nil, false)
+	}
+	node.dataLock.RUnlock()
+}
 func (node *Node) Stabilize() {
 	sn := node.LiveSuc()
 	var pn MyString
 	node.RemoteCall(sn.Val, "Node.GetPre", struct{}{}, &pn, false)
 	if pn.Val != "" && node.id.Code+1 != sn.Code && Contain(pn.Code, node.id.Code+1, sn.Code-1) {
+		node.RemoteCall(sn.Val, "Node.ClearBackup", node.id, nil, false)
 		node.routeLock.Lock()
 		logrus.Info(node.id, " suc from ", node.suc, " to ", pn)
 		node.suc = pn
 		node.routeLock.Unlock()
-
+		node.promoteBackup()
 	}
 	node.RemoteCall(sn.Val, "Node.Notify", node.id, nil, false)
 }
@@ -373,17 +402,17 @@ func (node *Node) Join(addr string) bool {
 	logrus.Infof("Join %s", addr)
 	node.routeLock.Lock()
 	for {
-		node.RemoteCall(addr, "Node.FindSuc", node.id.Code, &node.suc, true)
+		node.RemoteCall(addr, "Node.FindSuc", node.id.Code, &node.suc, false)
 		if node.suc.Code == node.id.Code {
 			node.id.Code++
 		} else {
 			break
 		}
 	}
-	node.RemoteCall(node.suc.Val, "Node.GetPre", struct{}{}, &node.pre, true)
+	node.RemoteCall(node.suc.Val, "Node.GetPre", struct{}{}, &node.pre, false)
 	suc := node.suc
 	node.routeLock.Unlock()
-	node.RemoteCall(suc.Val, "Node.Notify", node.id, nil, true)
+	node.RemoteCall(suc.Val, "Node.Notify", node.id, nil, false)
 	go node.period()
 	logrus.Infof("Join finish")
 	return true
@@ -455,7 +484,7 @@ func (node *Node) Put(key string, value string) bool {
 	tmp := Pair{MyString{key, hashCode(key)}, value}
 	var x MyString
 	node.FindSuc(tmp.Key.Code, &x)
-	node.RemoteCall(x.Val, "Node.PutPair", tmp, nil, true)
+	node.RemoteCall(x.Val, "Node.PutPair", tmp, nil, false)
 	return true
 }
 
@@ -465,7 +494,7 @@ func (node *Node) Get(key string) (bool, string) {
 	var x MyString
 	k := MyString{key, hashCode(key)}
 	node.FindSuc(k.Code, &x)
-	node.RemoteCall(x.Val, "Node.GetPair", k, &tmp, true)
+	node.RemoteCall(x.Val, "Node.GetPair", k, &tmp, false)
 	return tmp.Ok, tmp.Val
 }
 
@@ -475,7 +504,7 @@ func (node *Node) Delete(key string) bool {
 	var x MyString
 	node.FindSuc(k.Code, &x)
 	var tmp bool
-	node.RemoteCall(x.Val, "Node.DeletePair", k, &tmp, true)
+	node.RemoteCall(x.Val, "Node.DeletePair", k, &tmp, false)
 	return tmp
 }
 
@@ -493,12 +522,12 @@ func (node *Node) Quit() {
 	node.ifperiod = false
 	node.periodLock.Lock()
 	defer node.periodLock.Unlock()
-	node.SendData(suc, true)
+	node.SendData(suc, false)
 	var pre MyString
 	node.GetPre(struct{}{}, &pre)
-	node.RemoteCall(suc.Val, "Node.SetPre", pre, nil, true)
+	node.RemoteCall(suc.Val, "Node.SetPre", pre, nil, false)
 	if node.ping(pre.Val) {
-		node.RemoteCall(pre.Val, "Node.SetSuc", suc, nil, true)
+		node.RemoteCall(pre.Val, "Node.SetSuc", suc, nil, false)
 	}
 }
 
