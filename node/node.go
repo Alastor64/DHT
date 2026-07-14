@@ -209,6 +209,9 @@ func (node *Node) Ping(_ struct{}, _ *struct{}) error {
 // DHT methods
 //
 func (node *Node) ping(addr string) bool {
+	if addr == "" {
+		return false
+	}
 	return node.RemoteCall(addr, "Node.Ping", struct{}{}, nil, true) == nil
 }
 func (node *Node) LiveSuc() MyString {
@@ -307,8 +310,8 @@ func (node *Node) Notify(x MyString, reply *struct{}) error {
 func (node *Node) Stabilize() {
 	sn := node.LiveSuc()
 	var pn MyString
-	node.RemoteCall(sn.Val, "Node.GetPre", struct{}{}, &pn, false)
-	if pn.Val != "" && node.id.Code+1 != sn.Code && Contain(pn.Code, node.id.Code+1, sn.Code-1) {
+	err := node.RemoteCall(sn.Val, "Node.GetPre", struct{}{}, &pn, false)
+	if err == nil && pn.Val != "" && node.id.Code+1 != sn.Code && Contain(pn.Code, node.id.Code+1, sn.Code-1) {
 		// node.RemoteCall(sn.Val, "Node.ClearBackup", node.id, nil, false)
 		node.routeLock.Lock()
 		logrus.Info(node.id, " suc from ", node.suc, " to ", pn)
@@ -348,13 +351,22 @@ func (node *Node) FindSuc(id hint, reply *MyString) error {
 	suc := node.LiveSuc()
 	for !Contain(id, now.Code+1, suc.Code) {
 		// logrus.Info(node.id, " ", id, "checked", now, ",", suc)
-		tmp := now
-		node.RemoteCall(tmp.Val, "Node.FingerPre", id, &now, false)
-		if now == tmp {
-			now = suc
+		var tmp MyString
+		err := node.RemoteCall(now.Val, "Node.FingerPre", id, &tmp, false)
+		if err != nil {
+			return err
 		}
-		node.RemoteCall(now.Val, "Node.GetLiveSuc", struct{}{}, &suc, false)
-
+		if tmp == now {
+			now = suc
+		} else {
+			now = tmp
+		}
+		tmp = MyString{}
+		err = node.RemoteCall(now.Val, "Node.GetLiveSuc", struct{}{}, &tmp, false)
+		if err != nil {
+			return err
+		}
+		suc = tmp
 		if now == node.id {
 			logrus.Info("not found")
 			break
@@ -365,10 +377,12 @@ func (node *Node) FindSuc(id hint, reply *MyString) error {
 }
 func (node *Node) fixFinger() {
 	var tmp MyString
-	node.RemoteCall(node.id.Val, "Node.FindSuc", node.id.Code+(hint(1)<<node.fix_cnt), &tmp, false)
-	node.fingerLock.Lock()
-	defer node.fingerLock.Unlock()
-	node.finger[node.fix_cnt] = tmp
+	err := node.RemoteCall(node.id.Val, "Node.FindSuc", node.id.Code+(hint(1)<<node.fix_cnt), &tmp, false)
+	if err == nil {
+		node.fingerLock.Lock()
+		node.finger[node.fix_cnt] = tmp
+		node.fingerLock.Unlock()
+	}
 	node.fix_cnt++
 	if node.fix_cnt >= 8 {
 		node.fix_cnt = 0
@@ -405,25 +419,51 @@ func (node *Node) Create() {
 	go node.period()
 }
 
+// func (node *Node) TestGob(_ struct{}, reply *MyString) error {
+// 	*reply = MyString{"hh", 1}
+// 	return nil
+// }
 func (node *Node) Join(addr string) bool {
 	logrus.Infof("Join %s", addr)
+	// test := MyString{"fk gob", 66}
+	// terr := node.RemoteCall(addr, "Node.TestGob", struct{}{}, &test, true)
+	// if terr == nil {
+	// 	if test.Val == "hh" && test.Code == 1 {
+	// 		fmt.Println("f  k gob!")
+	// 	}
+	// }
 	node.routeLock.Lock()
 	for {
-		node.RemoteCall(addr, "Node.FindSuc", node.id.Code, &node.suc, true)
-		if node.suc.Code == node.id.Code {
+		var found MyString
+		err := node.RemoteCall(addr, "Node.FindSuc", node.id.Code, &found, true)
+		if err != nil {
+			continue
+		}
+		if found.Code == node.id.Code {
 			node.id.Code++
 		} else {
+			node.suc = found
 			break
 		}
 	}
-	node.RemoteCall(node.suc.Val, "Node.GetPre", struct{}{}, &node.pre, false)
+	var pre MyString
+	err := node.RemoteCall(node.suc.Val, "Node.GetPre", struct{}{}, &pre, false)
+	if err != nil {
+		node.pre = MyString{}
+	} else {
+		node.pre = pre
+	}
 	suc := node.suc
 	logrus.Info("Join finish", node.id, " pre=", node.pre, " suc=", node.suc)
 	node.routeLock.Unlock()
 	node.RemoteCall(suc.Val, "Node.Notify", node.id, nil, true)
 	var ch MyString
-	node.RemoteCall(suc.Val, "Node.GetPre", struct{}{}, &ch, true)
-	logrus.Info("ch pre:", ch)
+	err = node.RemoteCall(suc.Val, "Node.GetPre", struct{}{}, &ch, true)
+	if err == nil {
+		logrus.Info("ch pre:", ch)
+	} else {
+		logrus.Info("ch err")
+	}
 	go node.period()
 	return true
 }
@@ -506,7 +546,10 @@ func (node *Node) Get(key string) (bool, string) {
 	var x MyString
 	k := MyString{key, hashCode(key)}
 	node.FindSuc(k.Code, &x)
-	node.RemoteCall(x.Val, "Node.GetPair", k, &tmp, false)
+	err := node.RemoteCall(x.Val, "Node.GetPair", k, &tmp, false)
+	if err != nil {
+		logrus.Info("getpair unknown err", node.id)
+	}
 	return tmp.Ok, tmp.Val
 }
 
@@ -516,7 +559,10 @@ func (node *Node) Delete(key string) bool {
 	var x MyString
 	node.FindSuc(k.Code, &x)
 	var tmp bool
-	node.RemoteCall(x.Val, "Node.DeletePair", k, &tmp, false)
+	err := node.RemoteCall(x.Val, "Node.DeletePair", k, &tmp, false)
+	if err != nil {
+		logrus.Info("deletepair unknown err", node.id)
+	}
 	return tmp
 }
 
