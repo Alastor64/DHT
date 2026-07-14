@@ -57,12 +57,12 @@ func forceQuitTest() (bool, int, int) {
 		nodesInNetwork = append(nodesInNetwork, i)
 
 		time.Sleep(testutil.ForceQuitJoinSleepTime)
+		nodes[nodesInNetwork[0]].Dis(len(nodesInNetwork) + 1)
 	}
 	joinInfo.Finish(&forceQuitFailedCnt, &forceQuitTotalCnt)
 
 	time.Sleep(testutil.ForceQuitAfterJoinSleepTime)
 
-	nodes[nodesInNetwork[0]].Dis(len(nodesInNetwork) + 1)
 	putInfo := testutil.TestInfo{
 		Msg:       "Force quit put",
 		FailedCnt: 0,

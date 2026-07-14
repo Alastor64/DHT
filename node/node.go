@@ -142,7 +142,7 @@ func (node *Node) StopRPCServer() {
 // Re-connect to the client every time can be slow. You can use connection pool to improve the performance.
 func (node *Node) RemoteCall(addr string, method string, args interface{}, reply interface{}, iflog bool) error {
 	if method != "Node.Ping" {
-		if iflog && method == "Node.Display" {
+		if iflog {
 			logrus.Infof("[%s] RemoteCall %s %s %v", node.id.Val, addr, method, args)
 		}
 	}
@@ -256,8 +256,8 @@ func (node *Node) GetPre(_ struct{}, reply *MyString) error {
 		}
 		node.routeLock.RUnlock()
 		node.routeLock.Lock()
-		reply.Val = ""
-		node.pre.Val = ""
+		*reply = MyString{}
+		node.pre = MyString{}
 		node.routeLock.Unlock()
 	}
 	return nil
@@ -312,6 +312,7 @@ func (node *Node) Stabilize() {
 		node.suc = pn
 		node.routeLock.Unlock()
 		node.promoteBackup()
+		sn = pn
 	}
 	node.RemoteCall(sn.Val, "Node.Notify", node.id, nil, false)
 }
@@ -343,13 +344,16 @@ func (node *Node) FindSuc(id hint, reply *MyString) error {
 	now := node.id
 	suc := node.LiveSuc()
 	for !Contain(id, now.Code+1, suc.Code) {
+		logrus.Info(node.id, " ", id, "checked", now, ",", suc)
 		tmp := now
-		node.RemoteCall(now.Val, "Node.FingerPre", id, &now, false)
-		node.RemoteCall(now.Val, "Node.GetLiveSuc", struct{}{}, &suc, false)
+		node.RemoteCall(tmp.Val, "Node.FingerPre", id, &now, false)
 		if now == tmp {
 			now = suc
 		}
+		node.RemoteCall(now.Val, "Node.GetLiveSuc", struct{}{}, &suc, false)
+
 		if now == node.id {
+			logrus.Info("not found")
 			break
 		}
 	}
@@ -358,7 +362,7 @@ func (node *Node) FindSuc(id hint, reply *MyString) error {
 }
 func (node *Node) fixFinger() {
 	var tmp MyString
-	node.RemoteCall(node.id.Val, "Node.FindSuc", node.id.Code+(hint(1)<<node.fix_cnt), &tmp, false)
+	node.RemoteCall(node.id.Val, "Node.FindSuc", node.id.Code+(hint(1)<<node.fix_cnt), &tmp, true)
 	node.fingerLock.Lock()
 	defer node.fingerLock.Unlock()
 	node.finger[node.fix_cnt] = tmp
@@ -402,7 +406,7 @@ func (node *Node) Join(addr string) bool {
 	logrus.Infof("Join %s", addr)
 	node.routeLock.Lock()
 	for {
-		node.RemoteCall(addr, "Node.FindSuc", node.id.Code, &node.suc, false)
+		node.RemoteCall(addr, "Node.FindSuc", node.id.Code, &node.suc, true)
 		if node.suc.Code == node.id.Code {
 			node.id.Code++
 		} else {
@@ -480,7 +484,7 @@ func (node *Node) DeleteBackup(key BUString, reply *struct{}) error {
 }
 
 func (node *Node) Put(key string, value string) bool {
-	logrus.Infof("Put %s %s", key, value)
+	// logrus.Infof("Put %s %s", key, value)
 	tmp := Pair{MyString{key, hashCode(key)}, value}
 	var x MyString
 	node.FindSuc(tmp.Key.Code, &x)
@@ -489,7 +493,7 @@ func (node *Node) Put(key string, value string) bool {
 }
 
 func (node *Node) Get(key string) (bool, string) {
-	logrus.Infof("Get %s", key)
+	// logrus.Infof("Get %s", key)
 	var tmp Prply
 	var x MyString
 	k := MyString{key, hashCode(key)}
@@ -499,7 +503,7 @@ func (node *Node) Get(key string) (bool, string) {
 }
 
 func (node *Node) Delete(key string) bool {
-	logrus.Infof("Delete %s", key)
+	// logrus.Infof("Delete %s", key)
 	k := MyString{key, hashCode(key)}
 	var x MyString
 	node.FindSuc(k.Code, &x)
