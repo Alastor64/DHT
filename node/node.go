@@ -98,6 +98,9 @@ type Node struct {
 	fix_cnt    hint
 	periodLock sync.RWMutex
 	ifperiod   bool
+	clients    map[string]*rpc.Client
+	clientLock sync.RWMutex
+	connLock   sync.Mutex
 }
 
 // Initialize a node.
@@ -110,6 +113,7 @@ func (node *Node) Init(addr string) {
 	node.backup = make(map[BUString]string, 0)
 	node.data = make(map[MyString]string)
 	node.finger = make([]MyString, m)
+	node.clients = make(map[string]*rpc.Client)
 }
 
 func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
@@ -121,6 +125,7 @@ func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
 	if err != nil {
 		logrus.Fatal("listen error: ", err)
 	}
+	node.connLock.Lock()
 	for node.online {
 		conn, err := node.listener.Accept()
 		if err != nil {
@@ -129,35 +134,69 @@ func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
 			}
 			return
 		}
-		go node.server.ServeConn(conn)
+		go func(c net.Conn) {
+			go node.server.ServeConn(c)
+			node.connLock.Lock()
+			c.Close()
+			node.connLock.Unlock()
+		}(conn)
 	}
 }
 
 func (node *Node) StopRPCServer() {
 	node.online = false
 	node.listener.Close()
+	node.connLock.Unlock()
+}
+
+func (node *Node) getClient(addr string) (*rpc.Client, error) {
+	node.clientLock.RLock()
+	tmp, ok := node.clients[addr]
+	node.clientLock.RUnlock()
+	if ok {
+		return tmp, nil
+	}
+
+	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	if err != nil {
+		return nil, err
+	}
+
+	client := rpc.NewClient(conn)
+	node.clientLock.Lock()
+	node.clients[addr] = client
+	node.clientLock.Unlock()
+	return client, nil
+}
+func (node *Node) removeClient(addr string, bad *rpc.Client) {
+	node.clientLock.Lock()
+	defer node.clientLock.Unlock()
+
+	if current, ok := node.clients[addr]; ok && current == bad {
+		delete(node.clients, addr)
+		current.Close()
+	}
 }
 
 // RemoteCall calls the RPC method at addr.
 //
 // Note: An empty interface can hold values of any type. (https://tour.golang.org/methods/14)
 // Re-connect to the client every time can be slow. You can use connection pool to improve the performance.
+
 func (node *Node) RemoteCall(addr string, method string, args interface{}, reply interface{}, iflog bool) error {
 	if method != "Node.Ping" {
 		if iflog {
 			logrus.Infof("[%s] RemoteCall %s %s %v", node.id.Val, addr, method, args)
 		}
 	}
-	// Note: Here we use DialTimeout to set a timeout of 10 seconds.
-	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	client, err := node.getClient(addr)
 	if err != nil {
-		logrus.Error("dialing: ", err)
+		logrus.Error("RemoteCall tcp error: ", err)
 		return err
 	}
-	client := rpc.NewClient(conn)
-	defer client.Close()
 	err = client.Call(method, args, reply)
 	if err != nil {
+		node.removeClient(addr, client)
 		logrus.Error("RemoteCall error: ", err)
 		return err
 	}
