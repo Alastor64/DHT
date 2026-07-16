@@ -129,7 +129,7 @@ func (node *Kdm) ping(addr string) bool {
 	if addr == "" {
 		return false
 	}
-	return node.RemoteCall(addr, "Node.Ping", struct{}{}, nil, true) == nil
+	return node.RemoteCall(addr, "Kdm.Ping", struct{}{}, nil, true) == nil
 }
 
 // closerTo reports whether left is closer to code than right.
@@ -142,7 +142,7 @@ func closerTo(code hint, left, right MyString) bool {
 	if left.Code != right.Code {
 		return left.Code < right.Code
 	}
-	return left.Val < right.Val
+	return left.Code < right.Code
 }
 
 func sortByDistance(nodes []MyString, code hint) {
@@ -152,11 +152,14 @@ func sortByDistance(nodes []MyString, code hint) {
 }
 
 //获得桶中最近的alpha个节点
-func (node *Kdm) getAlphaNearest(code hint, reply *[]MyString) {
-	if reply == nil {
-		return
+func (node *Kdm) getNearest(code hint, limit int, cap int) []MyString {
+	if limit <= 0 {
+		return nil
 	}
-	*reply = (*reply)[:0]
+	if limit+k > cap {
+		cap = limit + k
+	}
+	reply := make([]MyString, cap)
 
 	// If d = code ^ node.id.Code and x = candidate.Code ^ node.id.Code,
 	// then code ^ candidate.Code = d ^ x. Bucket i contains exactly the
@@ -179,30 +182,138 @@ func (node *Kdm) getAlphaNearest(code hint, reply *[]MyString) {
 	for _, bucketIndex := range bucketOrder {
 		node.bucketLock.RLock()
 		if bucketIndex >= len(node.bucket) {
-			fmt.Println("unknown: len(node.bucket) too short in getAlphaNearest")
+			fmt.Println("unknown: len(node.bucket) too short in getNearest")
 			continue
 		}
-		*reply = append(*reply, node.bucket[bucketIndex]...)
+		reply = append(reply, node.bucket[bucketIndex]...)
 		node.bucketLock.RUnlock()
 
-		if len(*reply) >= alpha {
+		if len(reply) >= limit {
 			break
 		}
 	}
 
-	sortByDistance(*reply, code)
-	if len(*reply) > alpha {
-		*reply = (*reply)[:alpha]
+	sortByDistance(reply, code)
+	if len(reply) > limit {
+		reply = reply[:limit]
 	}
+	return reply
+}
+
+type findNodeResult struct {
+	from  MyString
+	nodes []MyString
+	err   error
+}
+
+// FindNode performs an iterative Kademlia node lookup. At most alpha requests
+// are in flight at once, and only the k closest known contacts are queried.
+func (node *Kdm) FindNode(code hint) []MyString {
+	candidates := node.getNearest(code, k, k+1)
+	queried := make([]bool, len(candidates), k+1)
+	inFlight := make(map[hint]struct{})
+
+	addCandidate := func(contact MyString) {
+		if contact.Val == "" || contact.Code == node.id.Code {
+			return
+		}
+
+		if len(candidates) == k {
+			farthest := candidates[len(candidates)-1]
+			if !closerTo(code, contact, farthest) {
+				return
+			}
+		}
+
+		for _, candidate := range candidates {
+			if candidate.Code == contact.Code {
+				return
+			}
+		}
+
+		insertAt := len(candidates)
+		for i, candidate := range candidates {
+			if closerTo(code, contact, candidate) {
+				insertAt = i
+				break
+			}
+		}
+
+		candidates = append(candidates, MyString{})
+		copy(candidates[insertAt+1:], candidates[insertAt:])
+		candidates[insertAt] = contact
+
+		queried = append(queried, false)
+		copy(queried[insertAt+1:], queried[insertAt:])
+		queried[insertAt] = false
+
+		if len(candidates) > k {
+			candidates = candidates[:k]
+			queried = queried[:k]
+		}
+	}
+
+	results := make(chan findNodeResult, alpha)
+	startQueries := func() {
+		for i := range candidates {
+			if len(inFlight) >= alpha {
+				return
+			}
+			if queried[i] {
+				continue
+			}
+
+			contact := candidates[i]
+			queried[i] = true
+			inFlight[contact.Code] = struct{}{}
+			go func(target MyString) {
+				var nearest []MyString
+				err := node.RemoteCall(target.Val, "Kdm.FindNodeRPC", code, &nearest, false)
+				results <- findNodeResult{from: target, nodes: nearest, err: err}
+			}(contact)
+		}
+	}
+
+	startQueries()
+	for len(inFlight) > 0 {
+		result := <-results
+		delete(inFlight, result.from.Code)
+
+		// Failed contacts deliberately remain in the shortlist. Since they have
+		// already been marked queried, they will not be requested again.
+		if result.err == nil {
+			for _, contact := range result.nodes {
+				addCandidate(contact)
+			}
+		}
+		startQueries()
+	}
+
+	// An empty inFlight set is essential: contacts are marked queried when a
+	// request is sent, so checking queried alone could finish before replies arrive.
+	return candidates
 }
 
 //RPC methods
+
+// FindNodeRPC is the single-hop FIND_NODE operation. It deliberately performs
+// no network lookup of its own; otherwise two peers could recursively start
+// full iterative lookups for each other.
+func (node *Kdm) FindNodeRPC(code hint, reply *[]MyString) error {
+	if reply != nil {
+		*reply = node.getNearest(code, k, k+1)
+	} else {
+		fmt.Println("unknown: FindNodeRPC's reply is nil")
+	}
+	return nil
+}
 
 func (node *Kdm) Ping(_ struct{}, _ *struct{}) error {
 	return nil
 }
 
 //DHT methods
+
 func (node *Kdm) Init(addr string) {
 	node.id.Val = addr
 	node.id.Code = hashCode(addr)
