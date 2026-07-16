@@ -144,6 +144,9 @@ func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
 }
 
 func (node *Node) StopRPCServer() {
+	if !node.online {
+		return
+	}
 	node.online = false
 	node.listener.Close()
 	node.connLock.Unlock()
