@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	k     = 10
-	alpha = 3
+	k           = 10
+	alpha       = 3
+	kdmTicktime = 6666 * time.Millisecond
 )
 
 type PString struct {
@@ -123,6 +124,8 @@ type Kdm struct {
 	bucket     []MyList
 	bucketMap  map[hint]bucketLocation
 	bucketLock sync.RWMutex
+	ifperiod   bool
+	periodLock sync.Mutex
 }
 
 //kdm methods
@@ -284,8 +287,7 @@ func (node *Kdm) killDeadContacts() {
 
 			currentLocation, stillPresent := node.bucketMap[leastRecent.Code]
 			if !stillPresent || currentLocation != leastRecentLocation ||
-				node.bucket[i].tail != leastRecentLocation.entry ||
-				node.bucket[i].freeHead == leastRecentLocation.entry {
+				node.bucket[i].tail != leastRecentLocation.entry {
 				node.bucketLock.Unlock()
 				continue
 			}
@@ -294,6 +296,16 @@ func (node *Kdm) killDeadContacts() {
 			node.bucketLock.Unlock()
 		}
 	}
+}
+
+func (node *Kdm) period() {
+	node.ifperiod = true
+	node.periodLock.Lock()
+	for node.ifperiod && node.online {
+		node.killDeadContacts()
+		time.Sleep(kdmTicktime)
+	}
+	node.periodLock.Unlock()
 }
 
 // removeBucketEntry removes a routing-table entry only if code still maps to
@@ -698,7 +710,7 @@ func (node *Kdm) Join(addr string) bool {
 			node.updateBucket(contact)
 		}
 	}
-
+	go node.period()
 	logrus.Infof("Join finish %v", node.id)
 	return true
 }
@@ -714,6 +726,7 @@ func (node *Kdm) Init(addr string) {
 func (node *Kdm) Create() {
 	logrus.Info("Create")
 	node.updateRouting = true
+	go node.period()
 }
 func (node *Kdm) ForceQuit() {
 	logrus.Info("ForceQuit")
@@ -726,6 +739,7 @@ func (node *Kdm) Dis(x int) {
 func (node *Kdm) Quit() {
 	defer node.StopRPCServer()
 	logrus.Infof("Quit %s", node.id.Val)
+	node.ifperiod = false
 }
 
 func (node *Kdm) Delete(key string) bool {
