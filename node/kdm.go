@@ -24,10 +24,11 @@ type PString struct {
 
 type MyListEntry struct {
 	value MyString
+	prev  *MyListEntry
 	next  *MyListEntry
 }
 
-// MyList is a fixed-capacity singly linked list. Its entries are allocated
+// MyList is a fixed-capacity doubly linked list. Its entries are allocated
 // once by makeMyList, so appending an entry never changes the list's
 // capacity or invalidates the links between entries.
 type MyList struct {
@@ -48,6 +49,7 @@ func (bucket *MyList) append(value MyString) bool {
 
 	entry := &bucket.entries[bucket.size]
 	entry.value = value
+	entry.prev = bucket.tail
 	entry.next = nil
 	if bucket.tail == nil {
 		bucket.head = entry
