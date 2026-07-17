@@ -466,6 +466,19 @@ func (node *Kdm) findNode(code hint) []MyString {
 	// request is sent, so checking queried alone could finish before replies arrive.
 	return candidates
 }
+func (node *Kdm) countLiving(contacts []MyString) int {
+	cnt := 0
+	for _, contact := range contacts {
+		if node.ping(contact) {
+			cnt++
+		}
+	}
+	return cnt
+}
+func (node *Kdm) testPGD(key string) int {
+	code := hashCode(key)
+	return node.countLiving(node.findNode(code))
+}
 
 //RPC methods
 
@@ -615,4 +628,24 @@ func (node *Kdm) ForceQuit() {
 }
 
 func (node *Kdm) Dis(x int) {
+}
+
+func (node *Kdm) Quit() {
+	defer node.StopRPCServer()
+	logrus.Infof("Quit %s", node.id.Val)
+}
+
+func (node *Kdm) Delete(key string) bool {
+	logrus.Info("Delete test:", node.testPGD(key))
+	return true
+}
+
+func (node *Kdm) Put(key string, value string) bool {
+	logrus.Info("Put test:", node.testPGD(key))
+	return true
+}
+
+func (node *Kdm) Get(key string) (bool, string) {
+	logrus.Info("Get test:", node.testPGD(key))
+	return true, ""
 }
