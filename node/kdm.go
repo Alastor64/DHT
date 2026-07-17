@@ -21,6 +21,51 @@ type PString struct {
 	Val     string
 	Version int
 }
+
+type MyListEntry struct {
+	value MyString
+	next  *MyListEntry
+}
+
+// MyList is a fixed-capacity singly linked list. Its entries are allocated
+// once by makeMyList, so appending an entry never changes the list's
+// capacity or invalidates the links between entries.
+type MyList struct {
+	entries []MyListEntry
+	head    *MyListEntry
+	tail    *MyListEntry
+	size    int
+}
+
+func makeMyList(capacity int) MyList {
+	return MyList{entries: make([]MyListEntry, capacity)}
+}
+
+func (bucket *MyList) append(value MyString) bool {
+	if bucket.size == len(bucket.entries) {
+		return false
+	}
+
+	entry := &bucket.entries[bucket.size]
+	entry.value = value
+	entry.next = nil
+	if bucket.tail == nil {
+		bucket.head = entry
+	} else {
+		bucket.tail.next = entry
+	}
+	bucket.tail = entry
+	bucket.size++
+	return true
+}
+
+func (bucket *MyList) appendValues(values []MyString) []MyString {
+	for entry := bucket.head; entry != nil; entry = entry.next {
+		values = append(values, entry.value)
+	}
+	return values
+}
+
 type Kdm struct {
 	clients    map[string]*rpc.Client
 	clientLock sync.RWMutex
@@ -33,8 +78,9 @@ type Kdm struct {
 	data     map[MyString]PString
 	datacnt  int
 	dataLock sync.RWMutex
-	//第一维i表示与自身异或值严格小于2^(i+1)范围固定为[0,m),第二维范围不固定但最大为[0,k)0号位置为桶的尾部即最近活跃节点
-	bucket     [][]MyString
+	// bucket[i] contains contacts whose XOR distance from this node is in
+	// [2^i, 2^(i+1)). The head is the least recently seen contact.
+	bucket     []MyList
 	bucketLock sync.RWMutex
 }
 
@@ -186,7 +232,7 @@ func (node *Kdm) getNearest(code hint, limit int, cap int) []MyString {
 			node.bucketLock.RUnlock()
 			continue
 		}
-		reply = append(reply, node.bucket[bucketIndex]...)
+		reply = node.bucket[bucketIndex].appendValues(reply)
 		node.bucketLock.RUnlock()
 
 		if len(reply) >= limit {
@@ -321,9 +367,9 @@ func (node *Kdm) Init(addr string) {
 	node.data = make(map[MyString]PString)
 	node.datacnt = 0
 	node.clients = make(map[string]*rpc.Client)
-	node.bucket = make([][]MyString, m)
+	node.bucket = make([]MyList, m)
 	for i := range node.bucket {
-		node.bucket[i] = make([]MyString, 0)
+		node.bucket[i] = makeMyList(k)
 	}
 }
 func (node *Kdm) ForceQuit() {
