@@ -4,6 +4,7 @@ package node
 import (
 	"fmt"
 	"math/bits"
+	"math/rand"
 	"net"
 	"net/rpc"
 	"sort"
@@ -94,12 +95,13 @@ type bucketLocation struct {
 }
 
 type Kdm struct {
-	clients    map[string]*rpc.Client
-	clientLock sync.RWMutex
-	connLock   sync.Mutex
-	online     bool
-	listener   net.Listener
-	server     *rpc.Server
+	clients       map[string]*rpc.Client
+	clientLock    sync.RWMutex
+	connLock      sync.Mutex
+	online        bool
+	updateRouting bool
+	listener      net.Listener
+	server        *rpc.Server
 
 	id       MyString
 	data     map[MyString]PString
@@ -196,6 +198,9 @@ func (node *Kdm) RemoteCall(target MyString, method string, args interface{}, re
 		logrus.Error("RemoteCall error: ", err)
 		return err
 	}
+	if method == "Kdm.GetCode" || !node.updateRouting {
+		return nil
+	}
 
 	node.updateBucket(target)
 	var updateReply struct{}
@@ -219,6 +224,17 @@ func (node *Kdm) bucketIndexFor(code hint) (int, bool) {
 		return 0, false
 	}
 	return bits.Len(uint(distance)) - 1, true
+}
+
+func (node *Kdm) resetBuckets() {
+	node.bucketLock.Lock()
+	defer node.bucketLock.Unlock()
+
+	node.bucket = make([]MyList, m)
+	node.bucketMap = make(map[hint]bucketLocation)
+	for i := range node.bucket {
+		node.bucket[i] = makeMyList(k)
+	}
 }
 
 // updateBucket records target as the most recently seen contact. If its
@@ -363,9 +379,9 @@ type findNodeResult struct {
 	err   error
 }
 
-// FindNode performs an iterative Kademlia node lookup. At most alpha requests
+// findNode performs an iterative Kademlia node lookup. At most alpha requests
 // are in flight at once, and only the k closest known contacts are queried.
-func (node *Kdm) FindNode(code hint) []MyString {
+func (node *Kdm) findNode(code hint) []MyString {
 	candidates := node.getNearest(code, k, k+1)
 	queried := make([]bool, len(candidates), k+1)
 	inFlight := make(map[hint]struct{})
@@ -453,6 +469,16 @@ func (node *Kdm) FindNode(code hint) []MyString {
 
 //RPC methods
 
+// FindNode exposes the iterative lookup over RPC.
+func (node *Kdm) FindNode(code hint, reply *[]MyString) error {
+	if reply == nil {
+		return fmt.Errorf("FindNode's reply is nil")
+	}
+
+	*reply = node.findNode(code)
+	return nil
+}
+
 // FindNodeRPC is the single-hop FIND_NODE operation. It deliberately performs
 // no network lookup of its own; otherwise two peers could recursively start
 // full iterative lookups for each other.
@@ -469,6 +495,16 @@ func (node *Kdm) Ping(_ struct{}, _ *struct{}) error {
 	return nil
 }
 
+// GetCode returns this node's current ID. RemoteCall deliberately does not
+// update either peer's routing table for this metadata-only RPC.
+func (node *Kdm) GetCode(_ struct{}, reply *hint) error {
+	if reply == nil {
+		return fmt.Errorf("GetCode's reply is nil")
+	}
+	*reply = node.id.Code
+	return nil
+}
+
 // UpdateBucket lets a peer report a successful interaction. It updates only
 // local routing state and deliberately sends no notification back.
 func (node *Kdm) UpdateBucket(target MyString, _ *struct{}) error {
@@ -478,19 +514,105 @@ func (node *Kdm) UpdateBucket(target MyString, _ *struct{}) error {
 
 //DHT methods
 
+// Join bootstraps this node through an existing Kademlia node.
+func (node *Kdm) Join(addr string) bool {
+	logrus.Infof("Join %s", addr)
+	if addr == "" || addr == node.id.Val {
+		return false
+	}
+	node.updateRouting = false
+	bootstrap := MyString{Val: addr}
+	if err := node.RemoteCall(bootstrap, "Kdm.GetCode", struct{}{}, &bootstrap.Code, true); err != nil {
+		return false
+	}
+
+	// The node ID cannot be inferred from its address. Query the bootstrap
+	// node by address until linear probing finds an unused ID. FindNode may
+	// return dead contacts; they still reserve their IDs and count as collisions.
+	var contacts []MyString
+	foundFreeID := false
+	for attempts := 0; attempts < 1<<uint(m); attempts++ {
+		contacts = nil
+		if err := node.RemoteCall(bootstrap, "Kdm.FindNode", node.id.Code, &contacts, true); err != nil {
+			return false
+		}
+
+		collision := bootstrap.Code == node.id.Code
+		for _, contact := range contacts {
+			if contact.Code == node.id.Code {
+				collision = true
+				break
+			}
+		}
+		if !collision {
+			foundFreeID = true
+			break
+		}
+		node.id.Code++
+	}
+	if !foundFreeID {
+		logrus.Error("Join failed: no free node ID")
+		return false
+	}
+
+	node.updateRouting = true
+	if !node.ping(bootstrap) {
+		node.resetBuckets()
+		node.updateRouting = false
+		return false
+	}
+	for _, contact := range contacts {
+		node.updateBucket(contact)
+	}
+
+	// Populate the routing table once around this node's own ID.
+	for _, contact := range node.findNode(node.id.Code) {
+		node.updateBucket(contact)
+	}
+
+	// A lookup can return dead contacts and leave some buckets sparse. For
+	// every bucket with fewer than alpha entries, look up a random ID whose
+	// XOR distance is guaranteed to fall into that bucket.
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	for bucketIndex := 0; bucketIndex < int(m); bucketIndex++ {
+		node.bucketLock.RLock()
+		bucketSize := node.bucket[bucketIndex].size
+		node.bucketLock.RUnlock()
+		if bucketSize >= alpha {
+			continue
+		}
+
+		lowerBits := hint(0)
+		if bucketIndex > 0 {
+			lowerBits = hint(rng.Intn(1 << uint(bucketIndex)))
+		}
+		distance := (hint(1) << uint(bucketIndex)) | lowerBits
+		target := node.id.Code ^ distance
+		for _, contact := range node.findNode(target) {
+			node.updateBucket(contact)
+		}
+	}
+
+	logrus.Infof("Join finish %v", node.id)
+	return true
+}
+
 func (node *Kdm) Init(addr string) {
 	node.id.Val = addr
 	node.id.Code = hashCode(addr)
 	node.data = make(map[MyString]PString)
 	node.datacnt = 0
 	node.clients = make(map[string]*rpc.Client)
-	node.bucket = make([]MyList, m)
-	node.bucketMap = make(map[hint]bucketLocation)
-	for i := range node.bucket {
-		node.bucket[i] = makeMyList(k)
-	}
+	node.resetBuckets()
+}
+func (node *Kdm) Create() {
+	logrus.Info("Create")
+	node.updateRouting = true
 }
 func (node *Kdm) ForceQuit() {
 	logrus.Info("ForceQuit")
 	node.StopRPCServer()
+}
+
+func (node *Kdm) Dis(x int) {
 }
