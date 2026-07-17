@@ -115,10 +115,11 @@ type Kdm struct {
 	listener      net.Listener
 	server        *rpc.Server
 
-	id       MyString
-	data     map[MyString]PString
-	datacnt  int
-	dataLock sync.RWMutex
+	id          MyString
+	data        map[MyString]string
+	dataVersion map[MyString]int
+	datacnt     int
+	dataLock    sync.RWMutex
 	// bucket[i] contains contacts whose XOR distance from this node is in
 	// [2^i, 2^(i+1)). The head is the most recently seen contact.
 	bucket     []MyList
@@ -718,7 +719,8 @@ func (node *Kdm) Join(addr string) bool {
 func (node *Kdm) Init(addr string) {
 	node.id.Val = addr
 	node.id.Code = hashCode(addr)
-	node.data = make(map[MyString]PString)
+	node.data = make(map[MyString]string)
+	node.dataVersion = make(map[MyString]int)
 	node.datacnt = 0
 	node.clients = make(map[string]*rpc.Client)
 	node.resetBuckets()
