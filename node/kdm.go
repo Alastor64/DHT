@@ -105,31 +105,31 @@ func (node *Kdm) removeClient(addr string, bad *rpc.Client) {
 	}
 }
 
-func (node *Kdm) RemoteCall(addr string, method string, args interface{}, reply interface{}, iflog bool) error {
+func (node *Kdm) RemoteCall(target MyString, method string, args interface{}, reply interface{}, iflog bool) error {
 	if method != "Kdm.Ping" {
 		if iflog {
-			logrus.Infof("[%s] RemoteCall %s %s %v", node.id.Val, addr, method, args)
+			logrus.Infof("[%s] RemoteCall %s %s %v", node.id.Val, target.Val, method, args)
 		}
 	}
-	client, err := node.getClient(addr)
+	client, err := node.getClient(target.Val)
 	if err != nil {
 		logrus.Error("RemoteCall tcp error: ", err)
 		return err
 	}
 	err = client.Call(method, args, reply)
 	if err != nil {
-		node.removeClient(addr, client)
+		node.removeClient(target.Val, client)
 		logrus.Error("RemoteCall error: ", err)
 		return err
 	}
 	return nil
 }
 
-func (node *Kdm) ping(addr string) bool {
-	if addr == "" {
+func (node *Kdm) ping(target MyString) bool {
+	if target.Val == "" {
 		return false
 	}
-	return node.RemoteCall(addr, "Kdm.Ping", struct{}{}, nil, true) == nil
+	return node.RemoteCall(target, "Kdm.Ping", struct{}{}, nil, true) == nil
 }
 
 // closerTo reports whether left is closer to code than right.
@@ -159,7 +159,7 @@ func (node *Kdm) getNearest(code hint, limit int, cap int) []MyString {
 	if limit+k > cap {
 		cap = limit + k
 	}
-	reply := make([]MyString, cap)
+	reply := make([]MyString, 0, cap)
 
 	// If d = code ^ node.id.Code and x = candidate.Code ^ node.id.Code,
 	// then code ^ candidate.Code = d ^ x. Bucket i contains exactly the
@@ -183,6 +183,7 @@ func (node *Kdm) getNearest(code hint, limit int, cap int) []MyString {
 		node.bucketLock.RLock()
 		if bucketIndex >= len(node.bucket) {
 			fmt.Println("unknown: len(node.bucket) too short in getNearest")
+			node.bucketLock.RUnlock()
 			continue
 		}
 		reply = append(reply, node.bucket[bucketIndex]...)
@@ -268,7 +269,7 @@ func (node *Kdm) FindNode(code hint) []MyString {
 			inFlight[contact.Code] = struct{}{}
 			go func(target MyString) {
 				var nearest []MyString
-				err := node.RemoteCall(target.Val, "Kdm.FindNodeRPC", code, &nearest, false)
+				err := node.RemoteCall(target, "Kdm.FindNodeRPC", code, &nearest, false)
 				results <- findNodeResult{from: target, nodes: nearest, err: err}
 			}(contact)
 		}
