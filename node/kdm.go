@@ -253,17 +253,53 @@ func (node *Kdm) resetBuckets() {
 	}
 }
 
+func (node *Kdm) killDeadContacts() {
+	for i := 0; i < int(m); i++ {
+		node.bucketLock.RLock()
+		bucket := node.bucket[i].appendValues(make([]MyString, 0, k))
+		node.bucketLock.RUnlock()
+		for _, j := range bucket {
+			node.ping(j)
+		}
+		for {
+			node.bucketLock.RLock()
+			leastRecent := node.bucket[i].tail.value
+			leastRecentLocation, mapped := node.bucketMap[leastRecent.Code]
+			if !mapped {
+				fmt.Println("unknown: map inconsistent in killDeadContacts")
+				node.bucketLock.Unlock()
+				break
+			}
+			node.bucketLock.RUnlock()
+
+			if node.ping(leastRecent) {
+				break
+			}
+
+			node.bucketLock.Lock()
+
+			currentLocation, stillPresent := node.bucketMap[leastRecent.Code]
+			if !stillPresent || currentLocation != leastRecentLocation ||
+				node.bucket[i].tail != leastRecentLocation.entry {
+				node.bucketLock.Unlock()
+				break
+			}
+
+			node.removeBucketEntry(leastRecent.Code, leastRecentLocation.entry)
+			node.bucketLock.Unlock()
+		}
+	}
+}
+
 // removeBucketEntry removes a routing-table entry only if code still maps to
 // the expected entry. The active list, free list and bucketMap are updated
 // atomically under bucketLock.
 // seems right
+// when calling this func the lock must be held
 func (node *Kdm) removeBucketEntry(code hint, expected *MyListEntry) bool {
 	if expected == nil {
 		return false
 	}
-
-	node.bucketLock.Lock()
-	defer node.bucketLock.Unlock()
 
 	location, exists := node.bucketMap[code]
 	if !exists || location.entry != expected {
