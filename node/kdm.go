@@ -585,8 +585,89 @@ func (node *Kdm) testPGD(key string) int {
 	code := hashCode(key)
 	return node.countLiving(node.findNode(code))
 }
+func (node *Kdm) getData(key MyString) DataReply {
+	candidates := node.findNode(key.Code)
+	reply := DataReply{"", 0, true}
+	for _, cancandidate := range candidates {
+		var tmp DataReply
+		if node.RemoteCall(cancandidate, "Kdm.GetPair", key, &tmp, false) != nil {
+			continue
+		}
+		if tmp.Version == reply.Version && tmp != reply {
+			fmt.Println("Version fail!!!")
+		}
+		if tmp.Version > reply.Version {
+			reply = tmp
+		}
+	}
+	return reply
+}
+func (node *Kdm) putData(key MyString, val DataReply) bool {
+	candidates := node.findNode(key.Code)
+	reply := DataReply{"", 0, true}
+	for _, cancandidate := range candidates {
+		var tmp DataReply
+		if node.RemoteCall(cancandidate, "Kdm.GetPair", key, &tmp, false) != nil {
+			continue
+		}
+		if tmp.Version == reply.Version && tmp != reply {
+			fmt.Println("Version fail!!!")
+		}
+		if tmp.Version > reply.Version {
+			reply = tmp
+		}
+	}
+	val.Version = reply.Version + 1
+	for _, cancandidate := range candidates {
+		node.RemoteCall(cancandidate, "Kdm.PutPair", VersionPair{key, val}, nil, false)
+	}
+	if val.Empty {
+		return !reply.Empty
+	} else {
+		return true
+	}
+}
 
 //RPC methods
+type DataReply struct {
+	Val     string
+	Version int
+	Empty   bool
+}
+type VersionPair struct {
+	Key MyString
+	Val DataReply
+}
+
+func (node *Kdm) GetPair(key MyString, reply *DataReply) error {
+	node.dataLock.RLock()
+	defer node.dataLock.RUnlock()
+	reply.Val, reply.Empty = node.data[key]
+	reply.Empty = !reply.Empty
+	var exist bool
+	reply.Version, exist = node.dataVersion[key]
+	if !exist {
+		reply.Version = 0
+	}
+	return nil
+}
+func (node *Kdm) PutPair(pair VersionPair, reply *struct{}) error {
+	node.dataLock.Lock()
+	defer node.dataLock.Unlock()
+	version, exist := node.dataVersion[pair.Key]
+	if exist && version >= pair.Val.Version {
+		fmt.Println("Version too slow!!!")
+	}
+	node.dataVersion[pair.Key] = pair.Val.Version
+	if pair.Val.Empty {
+		if _, ok := node.data[pair.Key]; ok {
+			delete(node.data, pair.Key)
+		}
+	} else {
+		node.data[pair.Key] = pair.Val.Val
+	}
+	return nil
+}
 
 // FindNode exposes the iterative lookup over RPC.
 func (node *Kdm) FindNode(code hint, reply *[]MyString) error {
@@ -746,17 +827,22 @@ func (node *Kdm) Quit() {
 
 func (node *Kdm) Delete(key string) bool {
 	logrus.Info("Delete test:", node.testPGD(key))
-	return true
+	return node.putData(MyString{key, hashCode(key)}, DataReply{"", 0, true})
 }
 
 func (node *Kdm) Put(key string, value string) bool {
 	logrus.Info("Put test:", node.testPGD(key))
-	return true
+	return node.putData(MyString{key, hashCode(key)}, DataReply{value, 0, false})
 }
 
 func (node *Kdm) Get(key string) (bool, string) {
 	logrus.Info("Get test:", node.testPGD(key))
-	return true, ""
+	reply := node.getData(MyString{key, hashCode(key)})
+	if reply.Empty {
+		return false, ""
+	} else {
+		return true, reply.Val
+	}
 }
 func (node *Kdm) Run(wg *sync.WaitGroup) {
 	node.online = true
