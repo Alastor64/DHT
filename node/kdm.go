@@ -263,11 +263,15 @@ func (node *Kdm) killDeadContacts() {
 		}
 		for {
 			node.bucketLock.RLock()
+			if node.bucket[i].tail == nil {
+				node.bucketLock.RUnlock()
+				break
+			}
 			leastRecent := node.bucket[i].tail.value
 			leastRecentLocation, mapped := node.bucketMap[leastRecent.Code]
 			if !mapped {
 				fmt.Println("unknown: map inconsistent in killDeadContacts")
-				node.bucketLock.Unlock()
+				node.bucketLock.RUnlock()
 				break
 			}
 			node.bucketLock.RUnlock()
@@ -280,9 +284,10 @@ func (node *Kdm) killDeadContacts() {
 
 			currentLocation, stillPresent := node.bucketMap[leastRecent.Code]
 			if !stillPresent || currentLocation != leastRecentLocation ||
-				node.bucket[i].tail != leastRecentLocation.entry {
+				node.bucket[i].tail != leastRecentLocation.entry ||
+				node.bucket[i].freeHead == leastRecentLocation.entry {
 				node.bucketLock.Unlock()
-				break
+				continue
 			}
 
 			node.removeBucketEntry(leastRecent.Code, leastRecentLocation.entry)
