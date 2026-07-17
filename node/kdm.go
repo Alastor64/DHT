@@ -32,25 +32,36 @@ type MyListEntry struct {
 
 // MyList is a fixed-capacity doubly linked list. Its entries are allocated
 // once by makeMyList, so inserting an entry never changes the list's
-// capacity or invalidates the links between entries.
+// capacity or invalidates the links between entries. Entries which are not
+// in the list form a singly linked free list through their next fields.
 type MyList struct {
-	entries []MyListEntry
-	head    *MyListEntry
-	tail    *MyListEntry
-	size    int
+	entries  []MyListEntry
+	head     *MyListEntry
+	tail     *MyListEntry
+	freeHead *MyListEntry
+	size     int
 }
 
 func makeMyList(capacity int) MyList {
-	return MyList{entries: make([]MyListEntry, capacity)}
+	bucket := MyList{entries: make([]MyListEntry, capacity)}
+	for i := range bucket.entries {
+		if i+1 < len(bucket.entries) {
+			bucket.entries[i].next = &bucket.entries[i+1]
+		}
+	}
+	if len(bucket.entries) > 0 {
+		bucket.freeHead = &bucket.entries[0]
+	}
+	return bucket
 }
 
-func (bucket *MyList) pushFront(value MyString) (int, bool) {
-	if bucket.size == len(bucket.entries) {
-		return 0, false
+func (bucket *MyList) pushFront(value MyString) (*MyListEntry, bool) {
+	entry := bucket.freeHead
+	if entry == nil {
+		return nil, false
 	}
 
-	entryIndex := bucket.size
-	entry := &bucket.entries[entryIndex]
+	bucket.freeHead = entry.next
 	entry.value = value
 	entry.prev = nil
 	entry.next = bucket.head
@@ -61,7 +72,31 @@ func (bucket *MyList) pushFront(value MyString) (int, bool) {
 	}
 	bucket.head = entry
 	bucket.size++
-	return entryIndex, true
+	return entry, true
+}
+
+func (bucket *MyList) remove(entry *MyListEntry) bool {
+	if entry == nil {
+		return false
+	}
+
+	if entry.prev == nil {
+		bucket.head = entry.next
+	} else {
+		entry.prev.next = entry.next
+	}
+	if entry.next == nil {
+		bucket.tail = entry.prev
+	} else {
+		entry.next.prev = entry.prev
+	}
+
+	entry.value = MyString{}
+	entry.prev = nil
+	entry.next = bucket.freeHead
+	bucket.freeHead = entry
+	bucket.size--
+	return true
 }
 
 func (bucket *MyList) moveToFront(entry *MyListEntry) {
@@ -91,7 +126,7 @@ func (bucket *MyList) appendValues(values []MyString) []MyString {
 
 type bucketLocation struct {
 	bucketIndex int
-	entryIndex  int
+	entry       *MyListEntry
 }
 
 type Kdm struct {
@@ -254,17 +289,16 @@ func (node *Kdm) updateBucket(target MyString) {
 	for {
 		node.bucketLock.Lock()
 		if location, exists := node.bucketMap[target.Code]; exists {
-			entry := &node.bucket[location.bucketIndex].entries[location.entryIndex]
-			node.bucket[location.bucketIndex].moveToFront(entry)
+			node.bucket[location.bucketIndex].moveToFront(location.entry)
 			node.bucketLock.Unlock()
 			return
 		}
 
 		bucket := &node.bucket[bucketIndex]
-		if entryIndex, inserted := bucket.pushFront(target); inserted {
+		if entry, inserted := bucket.pushFront(target); inserted {
 			node.bucketMap[target.Code] = bucketLocation{
 				bucketIndex: bucketIndex,
-				entryIndex:  entryIndex,
+				entry:       entry,
 			}
 			node.bucketLock.Unlock()
 			return
@@ -285,8 +319,7 @@ func (node *Kdm) updateBucket(target MyString) {
 
 		node.bucketLock.Lock()
 		if location, exists := node.bucketMap[target.Code]; exists {
-			entry := &node.bucket[location.bucketIndex].entries[location.entryIndex]
-			node.bucket[location.bucketIndex].moveToFront(entry)
+			node.bucket[location.bucketIndex].moveToFront(location.entry)
 			node.bucketLock.Unlock()
 			return
 		}
@@ -294,12 +327,12 @@ func (node *Kdm) updateBucket(target MyString) {
 		bucket = &node.bucket[bucketIndex]
 		currentLocation, stillPresent := node.bucketMap[leastRecent.Code]
 		if !stillPresent || currentLocation != leastRecentLocation ||
-			bucket.tail != &bucket.entries[leastRecentLocation.entryIndex] {
+			bucket.tail != leastRecentLocation.entry {
 			node.bucketLock.Unlock()
 			continue
 		}
 
-		entry := &bucket.entries[leastRecentLocation.entryIndex]
+		entry := leastRecentLocation.entry
 		delete(node.bucketMap, leastRecent.Code)
 		entry.value = target
 		bucket.moveToFront(entry)
