@@ -256,6 +256,7 @@ func (node *Kdm) resetBuckets() {
 // removeBucketEntry removes a routing-table entry only if code still maps to
 // the expected entry. The active list, free list and bucketMap are updated
 // atomically under bucketLock.
+// seems right
 func (node *Kdm) removeBucketEntry(code hint, expected *MyListEntry) bool {
 	if expected == nil {
 		return false
