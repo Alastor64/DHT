@@ -28,11 +28,11 @@ func init() {
 	logrus.SetOutput(f)
 }
 
-type hint = uint16
+type hint = uint8
 
 const (
-	m        = hint(16)
-	base     = hint(269)
+	m        = hint(8)
+	base     = 37 //hint(269)
 	ticktime = 7 * time.Millisecond
 )
 

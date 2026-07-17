@@ -17,7 +17,9 @@ import (
 const (
 	k           = 10
 	alpha       = 3
-	kdmTicktime = 6666 * time.Millisecond
+	kdmTicktime = 400 * time.Millisecond
+	killTick    = 20
+	sendTick    = 1
 )
 
 type PString struct {
@@ -299,11 +301,55 @@ func (node *Kdm) killDeadContacts() {
 	}
 }
 
+func (node *Kdm) sendData() {
+	node.dataLock.RLock()
+	dataVersion := make(map[MyString]int, 0)
+	data := make(map[MyString]string, 0)
+	for t1, t2 := range node.data {
+		data[t1] = t2
+	}
+	for t1, t2 := range node.dataVersion {
+		dataVersion[t1] = t2
+	}
+	node.dataLock.RUnlock()
+	for key, version := range dataVersion {
+		var tmp VersionPair
+		tmp.Val.Val, tmp.Val.Empty = data[key]
+		tmp.Val.Empty = !tmp.Val.Empty
+		tmp.Val.Version = version
+		tmp.Key = key
+		index, ok := node.bucketIndexFor(tmp.Key.Code)
+		if !ok {
+			continue
+		}
+		candidates := make([]MyString, 0, k)
+		node.bucketLock.RLock()
+		candidates = node.bucket[index].appendValues(candidates)
+		node.bucketLock.RUnlock()
+		sortByDistance(candidates, tmp.Key.Code)
+		for _, cancandidate := range candidates {
+			if !closerTo(tmp.Key.Code, cancandidate, node.id) {
+				break
+			}
+			if node.RemoteCall(cancandidate, "Kdm.PutPair", tmp, nil, false) == nil {
+				break
+			}
+		}
+	}
+}
+
 func (node *Kdm) period() {
 	node.ifperiod = true
 	node.periodLock.Lock()
+	var cnt int = 0
 	for node.ifperiod && node.online {
-		node.killDeadContacts()
+		cnt++
+		if cnt%killTick == 0 {
+			node.killDeadContacts()
+		}
+		if cnt%sendTick == 0 {
+			node.sendData()
+		}
 		time.Sleep(kdmTicktime)
 	}
 	node.periodLock.Unlock()
@@ -656,7 +702,7 @@ func (node *Kdm) PutPair(pair VersionPair, reply *struct{}) error {
 	defer node.dataLock.Unlock()
 	version, exist := node.dataVersion[pair.Key]
 	if exist && version >= pair.Val.Version {
-		fmt.Println("Version too slow!!!")
+		return nil
 	}
 	node.dataVersion[pair.Key] = pair.Val.Version
 	if pair.Val.Empty {
