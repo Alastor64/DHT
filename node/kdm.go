@@ -182,20 +182,25 @@ func (node *Kdm) removeClient(addr string, bad *rpc.Client) {
 }
 
 func (node *Kdm) RemoteCall(target MyString, method string, args interface{}, reply interface{}, iflog bool) error {
-	if method != "Kdm.Ping" {
-		if iflog {
-			logrus.Infof("[%s] RemoteCall %s %s %v", node.id.Val, target.Val, method, args)
-		}
+	if method == "Kdm.Ping" {
+		iflog = false
+	}
+	if iflog {
+		logrus.Infof("[%s] RemoteCall %s %s %v", node.id.Val, target.Val, method, args)
 	}
 	client, err := node.getClient(target.Val)
 	if err != nil {
-		logrus.Error("RemoteCall tcp error: ", err)
+		if iflog {
+			logrus.Error("RemoteCall tcp error: ", err)
+		}
 		return err
 	}
 	err = client.Call(method, args, reply)
 	if err != nil {
 		node.removeClient(target.Val, client)
-		logrus.Error("RemoteCall error: ", err)
+		if iflog {
+			logrus.Error("RemoteCall error: ", err)
+		}
 		return err
 	}
 	if method == "Kdm.GetCode" || !node.updateRouting {
@@ -648,4 +653,8 @@ func (node *Kdm) Put(key string, value string) bool {
 func (node *Kdm) Get(key string) (bool, string) {
 	logrus.Info("Get test:", node.testPGD(key))
 	return true, ""
+}
+func (node *Kdm) Run(wg *sync.WaitGroup) {
+	node.online = true
+	go node.RunRPCServer(wg)
 }

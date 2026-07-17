@@ -28,11 +28,11 @@ func init() {
 	logrus.SetOutput(f)
 }
 
-type hint = uint8
+type hint = uint16
 
 const (
-	m        = hint(8)
-	base     = 37 //hint(269)
+	m        = hint(16)
+	base     = hint(269)
 	ticktime = 7 * time.Millisecond
 )
 
@@ -46,7 +46,7 @@ func Contain(x, l, r hint) bool {
 
 func hashCode(s string) hint {
 	val := hint(0)
-	for i := 0; i < len(s); i++ {
+	for i := len(s) - 1; i >= 0; i-- {
 		val *= base
 		val += hint(s[i])
 	}
