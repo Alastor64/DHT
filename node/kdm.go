@@ -3,6 +3,7 @@ package node
 //note：这份代码实现dht结点，对外提供与node.go中的实现完全一致的接口，但内部实现使用kademlia算法
 import (
 	"fmt"
+	"math/bits"
 	"net"
 	"net/rpc"
 	"sort"
@@ -29,7 +30,7 @@ type MyListEntry struct {
 }
 
 // MyList is a fixed-capacity doubly linked list. Its entries are allocated
-// once by makeMyList, so appending an entry never changes the list's
+// once by makeMyList, so inserting an entry never changes the list's
 // capacity or invalidates the links between entries.
 type MyList struct {
 	entries []MyListEntry
@@ -42,23 +43,42 @@ func makeMyList(capacity int) MyList {
 	return MyList{entries: make([]MyListEntry, capacity)}
 }
 
-func (bucket *MyList) append(value MyString) bool {
+func (bucket *MyList) pushFront(value MyString) (int, bool) {
 	if bucket.size == len(bucket.entries) {
-		return false
+		return 0, false
 	}
 
-	entry := &bucket.entries[bucket.size]
+	entryIndex := bucket.size
+	entry := &bucket.entries[entryIndex]
 	entry.value = value
-	entry.prev = bucket.tail
-	entry.next = nil
-	if bucket.tail == nil {
-		bucket.head = entry
+	entry.prev = nil
+	entry.next = bucket.head
+	if bucket.head == nil {
+		bucket.tail = entry
 	} else {
-		bucket.tail.next = entry
+		bucket.head.prev = entry
 	}
-	bucket.tail = entry
+	bucket.head = entry
 	bucket.size++
-	return true
+	return entryIndex, true
+}
+
+func (bucket *MyList) moveToFront(entry *MyListEntry) {
+	if entry == nil || entry == bucket.head {
+		return
+	}
+
+	entry.prev.next = entry.next
+	if entry.next == nil {
+		bucket.tail = entry.prev
+	} else {
+		entry.next.prev = entry.prev
+	}
+
+	entry.prev = nil
+	entry.next = bucket.head
+	bucket.head.prev = entry
+	bucket.head = entry
 }
 
 func (bucket *MyList) appendValues(values []MyString) []MyString {
@@ -66,6 +86,11 @@ func (bucket *MyList) appendValues(values []MyString) []MyString {
 		values = append(values, entry.value)
 	}
 	return values
+}
+
+type bucketLocation struct {
+	bucketIndex int
+	entryIndex  int
 }
 
 type Kdm struct {
@@ -81,8 +106,9 @@ type Kdm struct {
 	datacnt  int
 	dataLock sync.RWMutex
 	// bucket[i] contains contacts whose XOR distance from this node is in
-	// [2^i, 2^(i+1)). The head is the least recently seen contact.
+	// [2^i, 2^(i+1)). The head is the most recently seen contact.
 	bucket     []MyList
+	bucketMap  map[hint]bucketLocation
 	bucketLock sync.RWMutex
 }
 
@@ -170,6 +196,13 @@ func (node *Kdm) RemoteCall(target MyString, method string, args interface{}, re
 		logrus.Error("RemoteCall error: ", err)
 		return err
 	}
+
+	node.updateBucket(target)
+	var updateReply struct{}
+	if updateErr := client.Call("Kdm.UpdateBucket", node.id, &updateReply); updateErr != nil {
+		node.removeClient(target.Val, client)
+		logrus.Error("UpdateBucket notification error: ", updateErr)
+	}
 	return nil
 }
 
@@ -178,6 +211,81 @@ func (node *Kdm) ping(target MyString) bool {
 		return false
 	}
 	return node.RemoteCall(target, "Kdm.Ping", struct{}{}, nil, true) == nil
+}
+
+func (node *Kdm) bucketIndexFor(code hint) (int, bool) {
+	distance := node.id.Code ^ code
+	if distance == 0 {
+		return 0, false
+	}
+	return bits.Len(uint(distance)) - 1, true
+}
+
+// updateBucket records target as the most recently seen contact. If its
+// bucket is full, the least recently seen contact is pinged before it can be
+// replaced. No network operation is performed while bucketLock is held.
+func (node *Kdm) updateBucket(target MyString) {
+	bucketIndex, ok := node.bucketIndexFor(target.Code)
+	if !ok || target.Val == "" {
+		return
+	}
+
+	for {
+		node.bucketLock.Lock()
+		if location, exists := node.bucketMap[target.Code]; exists {
+			entry := &node.bucket[location.bucketIndex].entries[location.entryIndex]
+			node.bucket[location.bucketIndex].moveToFront(entry)
+			node.bucketLock.Unlock()
+			return
+		}
+
+		bucket := &node.bucket[bucketIndex]
+		if entryIndex, inserted := bucket.pushFront(target); inserted {
+			node.bucketMap[target.Code] = bucketLocation{
+				bucketIndex: bucketIndex,
+				entryIndex:  entryIndex,
+			}
+			node.bucketLock.Unlock()
+			return
+		}
+
+		leastRecent := bucket.tail.value
+		leastRecentLocation, mapped := node.bucketMap[leastRecent.Code]
+		if !mapped {
+			fmt.Println("unknown: map inconsistent in update bucket")
+			node.bucketLock.Unlock()
+			return
+		}
+		node.bucketLock.Unlock()
+
+		if node.ping(leastRecent) {
+			return
+		}
+
+		node.bucketLock.Lock()
+		if location, exists := node.bucketMap[target.Code]; exists {
+			entry := &node.bucket[location.bucketIndex].entries[location.entryIndex]
+			node.bucket[location.bucketIndex].moveToFront(entry)
+			node.bucketLock.Unlock()
+			return
+		}
+
+		bucket = &node.bucket[bucketIndex]
+		currentLocation, stillPresent := node.bucketMap[leastRecent.Code]
+		if !stillPresent || currentLocation != leastRecentLocation ||
+			bucket.tail != &bucket.entries[leastRecentLocation.entryIndex] {
+			node.bucketLock.Unlock()
+			continue
+		}
+
+		entry := &bucket.entries[leastRecentLocation.entryIndex]
+		delete(node.bucketMap, leastRecent.Code)
+		entry.value = target
+		bucket.moveToFront(entry)
+		node.bucketMap[target.Code] = leastRecentLocation
+		node.bucketLock.Unlock()
+		return
+	}
 }
 
 // closerTo reports whether left is closer to code than right.
@@ -361,6 +469,13 @@ func (node *Kdm) Ping(_ struct{}, _ *struct{}) error {
 	return nil
 }
 
+// UpdateBucket lets a peer report a successful interaction. It updates only
+// local routing state and deliberately sends no notification back.
+func (node *Kdm) UpdateBucket(target MyString, _ *struct{}) error {
+	node.updateBucket(target)
+	return nil
+}
+
 //DHT methods
 
 func (node *Kdm) Init(addr string) {
@@ -370,6 +485,7 @@ func (node *Kdm) Init(addr string) {
 	node.datacnt = 0
 	node.clients = make(map[string]*rpc.Client)
 	node.bucket = make([]MyList, m)
+	node.bucketMap = make(map[hint]bucketLocation)
 	for i := range node.bucket {
 		node.bucket[i] = makeMyList(k)
 	}
