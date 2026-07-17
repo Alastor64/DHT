@@ -75,30 +75,6 @@ func (bucket *MyList) pushFront(value MyString) (*MyListEntry, bool) {
 	return entry, true
 }
 
-func (bucket *MyList) remove(entry *MyListEntry) bool {
-	if entry == nil {
-		return false
-	}
-
-	if entry.prev == nil {
-		bucket.head = entry.next
-	} else {
-		entry.prev.next = entry.next
-	}
-	if entry.next == nil {
-		bucket.tail = entry.prev
-	} else {
-		entry.next.prev = entry.prev
-	}
-
-	entry.value = MyString{}
-	entry.prev = nil
-	entry.next = bucket.freeHead
-	bucket.freeHead = entry
-	bucket.size--
-	return true
-}
-
 func (bucket *MyList) moveToFront(entry *MyListEntry) {
 	if entry == nil || entry == bucket.head {
 		return
@@ -275,6 +251,43 @@ func (node *Kdm) resetBuckets() {
 	for i := range node.bucket {
 		node.bucket[i] = makeMyList(k)
 	}
+}
+
+// removeBucketEntry removes a routing-table entry only if code still maps to
+// the expected entry. The active list, free list and bucketMap are updated
+// atomically under bucketLock.
+func (node *Kdm) removeBucketEntry(code hint, expected *MyListEntry) bool {
+	if expected == nil {
+		return false
+	}
+
+	node.bucketLock.Lock()
+	defer node.bucketLock.Unlock()
+
+	location, exists := node.bucketMap[code]
+	if !exists || location.entry != expected {
+		return false
+	}
+
+	bucket := &node.bucket[location.bucketIndex]
+	if expected.prev == nil {
+		bucket.head = expected.next
+	} else {
+		expected.prev.next = expected.next
+	}
+	if expected.next == nil {
+		bucket.tail = expected.prev
+	} else {
+		expected.next.prev = expected.prev
+	}
+
+	delete(node.bucketMap, code)
+	expected.value = MyString{}
+	expected.prev = nil
+	expected.next = bucket.freeHead
+	bucket.freeHead = expected
+	bucket.size--
+	return true
 }
 
 // updateBucket records target as the most recently seen contact. If its
