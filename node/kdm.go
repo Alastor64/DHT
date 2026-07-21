@@ -17,7 +17,7 @@ import (
 const (
 	k           = 10
 	alpha       = 3
-	kdmTicktime = 100 * time.Millisecond
+	kdmTicktime = 5 * time.Millisecond
 	killTick    = 95
 	sendTick    = 95
 )
