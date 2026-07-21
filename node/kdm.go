@@ -17,9 +17,9 @@ import (
 const (
 	k           = 10
 	alpha       = 3
-	kdmTicktime = 400 * time.Millisecond
-	killTick    = 20
-	sendTick    = 1
+	kdmTicktime = 100 * time.Millisecond
+	killTick    = 95
+	sendTick    = 95
 )
 
 type PString struct {
@@ -318,22 +318,21 @@ func (node *Kdm) sendData() {
 		tmp.Val.Empty = !tmp.Val.Empty
 		tmp.Val.Version = version
 		tmp.Key = key
-		index, ok := node.bucketIndexFor(tmp.Key.Code)
-		if !ok {
-			continue
-		}
-		candidates := make([]MyString, 0, k)
-		node.bucketLock.RLock()
-		candidates = node.bucket[index].appendValues(candidates)
-		node.bucketLock.RUnlock()
-		sortByDistance(candidates, tmp.Key.Code)
+		candidates := node.findNode(tmp.Key.Code)
+		// index, ok := node.bucketIndexFor(tmp.Key.Code)
+		// if !ok {
+		// 	continue
+		// }
+		// candidates := make([]MyString, 0, k)
+		// node.bucketLock.RLock()
+		// candidates = node.bucket[index].appendValues(candidates)
+		// node.bucketLock.RUnlock()
+		// sortByDistance(candidates, tmp.Key.Code)
 		for _, cancandidate := range candidates {
-			if !closerTo(tmp.Key.Code, cancandidate, node.id) {
-				break
-			}
-			if node.RemoteCall(cancandidate, "Kdm.PutPair", tmp, nil, false) == nil {
-				break
-			}
+			// if !closerTo(tmp.Key.Code, cancandidate, node.id) {
+			// 	break
+			// }
+			node.RemoteCall(cancandidate, "Kdm.PutPair", tmp, nil, false)
 		}
 	}
 }
@@ -628,11 +627,13 @@ func (node *Kdm) countLiving(contacts []MyString) int {
 	return cnt
 }
 func (node *Kdm) testPGD(key string) int {
+	// fmt.Println("zz")
 	code := hashCode(key)
 	return node.countLiving(node.findNode(code))
 }
 func (node *Kdm) getData(key MyString) DataReply {
 	candidates := node.findNode(key.Code)
+	candidates = append(candidates, node.id)
 	reply := DataReply{"", 0, true}
 	for _, cancandidate := range candidates {
 		var tmp DataReply
@@ -646,10 +647,12 @@ func (node *Kdm) getData(key MyString) DataReply {
 			reply = tmp
 		}
 	}
+
 	return reply
 }
 func (node *Kdm) putData(key MyString, val DataReply) bool {
 	candidates := node.findNode(key.Code)
+	candidates = append(candidates, node.id)
 	reply := DataReply{"", 0, true}
 	for _, cancandidate := range candidates {
 		var tmp DataReply
@@ -872,17 +875,18 @@ func (node *Kdm) Quit() {
 }
 
 func (node *Kdm) Delete(key string) bool {
-	logrus.Info("Delete test:", node.testPGD(key))
+	// logrus.Info("Delete test:", node.testPGD(key))
 	return node.putData(MyString{key, hashCode(key)}, DataReply{"", 0, true})
 }
 
 func (node *Kdm) Put(key string, value string) bool {
-	logrus.Info("Put test:", node.testPGD(key))
+	// logrus.Info("Put test:", node.testPGD(key))
 	return node.putData(MyString{key, hashCode(key)}, DataReply{value, 0, false})
 }
 
 func (node *Kdm) Get(key string) (bool, string) {
-	logrus.Info("Get test:", node.testPGD(key))
+	// fmt.Println("zz")
+	// logrus.Info("Get test:", node.testPGD(key))
 	reply := node.getData(MyString{key, hashCode(key)})
 	if reply.Empty {
 		return false, ""
