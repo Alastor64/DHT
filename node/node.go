@@ -33,7 +33,7 @@ type hint = uint8
 const (
 	m        = hint(8)
 	base     = 37 //hint(269)
-	ticktime = 7 * time.Millisecond
+	ticktime = 100 * time.Millisecond
 )
 
 func Contain(x, l, r hint) bool {
@@ -84,8 +84,6 @@ type Node struct {
 	id     MyString
 	online bool
 
-	serverLock sync.Mutex
-	conns      map[net.Conn]struct{}
 	listener   net.Listener
 	server     *rpc.Server
 	data       map[MyString]string
@@ -100,14 +98,11 @@ type Node struct {
 	fix_cnt    hint
 	periodLock sync.RWMutex
 	ifperiod   bool
-	clients    map[string]*rpc.Client
-	clientLock sync.RWMutex
 }
 
 // Initialize a node.
 // Addr is the address and port number of the node, e.g., "localhost:1234".
 func (node *Node) Init(addr string) {
-	node.conns = make(map[net.Conn]struct{})
 	node.id.Val = addr
 	node.id.Code = hashCode(addr)
 	node.suc = node.id
@@ -115,7 +110,6 @@ func (node *Node) Init(addr string) {
 	node.backup = make(map[BUString]string, 0)
 	node.data = make(map[MyString]string)
 	node.finger = make([]MyString, m)
-	node.clients = make(map[string]*rpc.Client)
 }
 
 func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
@@ -135,74 +129,18 @@ func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
 			}
 			return
 		}
-		node.serverLock.Lock()
-		if !node.online {
-			node.serverLock.Unlock()
-			conn.Close()
-			continue
-		}
-		node.conns[conn] = struct{}{}
-		node.serverLock.Unlock()
-		go func(c net.Conn) {
-			defer func() {
-				node.serverLock.Lock()
-				delete(node.conns, c)
-				node.serverLock.Unlock()
-				c.Close()
-			}()
-			node.server.ServeConn(c)
-		}(conn)
+		go node.server.ServeConn(conn)
 	}
 }
 
 func (node *Node) StopRPCServer() {
-	node.serverLock.Lock()
 	if !node.online {
-		node.serverLock.Unlock()
 		return
 	}
 
 	node.online = false
 	node.listener.Close()
 
-	conns := make([]net.Conn, 0, len(node.conns))
-	for conn := range node.conns {
-		conns = append(conns, conn)
-	}
-	node.serverLock.Unlock()
-
-	for _, conn := range conns {
-		conn.Close()
-	}
-}
-
-func (node *Node) getClient(addr string) (*rpc.Client, error) {
-	node.clientLock.RLock()
-	tmp, ok := node.clients[addr]
-	node.clientLock.RUnlock()
-	if ok {
-		return tmp, nil
-	}
-
-	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-	if err != nil {
-		return nil, err
-	}
-
-	client := rpc.NewClient(conn)
-	node.clientLock.Lock()
-	node.clients[addr] = client
-	node.clientLock.Unlock()
-	return client, nil
-}
-func (node *Node) removeClient(addr string, bad *rpc.Client) {
-	node.clientLock.Lock()
-	defer node.clientLock.Unlock()
-
-	if current, ok := node.clients[addr]; ok && current == bad {
-		delete(node.clients, addr)
-		current.Close()
-	}
 }
 
 // RemoteCall calls the RPC method at addr.
@@ -213,17 +151,19 @@ func (node *Node) removeClient(addr string, bad *rpc.Client) {
 func (node *Node) RemoteCall(addr string, method string, args interface{}, reply interface{}, iflog bool) error {
 	if method != "Node.Ping" {
 		if iflog {
-			logrus.Infof("[%s] RemoteCall %s %s %v", node.id.Val, addr, method, args)
+			logrus.Infof("[%s] RemoteCall %s %s %v", addr, addr, method, args)
 		}
 	}
-	client, err := node.getClient(addr)
+	// Note: Here we use DialTimeout to set a timeout of 10 seconds.
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {
-		logrus.Error("RemoteCall tcp error: ", err)
+		logrus.Error("dialing: ", err)
 		return err
 	}
+	client := rpc.NewClient(conn)
+	defer client.Close()
 	err = client.Call(method, args, reply)
 	if err != nil {
-		node.removeClient(addr, client)
 		logrus.Error("RemoteCall error: ", err)
 		return err
 	}
