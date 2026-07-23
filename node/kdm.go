@@ -109,9 +109,6 @@ type bucketLocation struct {
 }
 
 type Kdm struct {
-	clients       map[string]*rpc.Client
-	clientLock    sync.RWMutex
-	connLock      sync.Mutex
 	online        bool
 	updateRouting bool
 	listener      net.Listener
@@ -142,7 +139,6 @@ func (node *Kdm) RunRPCServer(wg *sync.WaitGroup) {
 	if err != nil {
 		logrus.Fatal("listen error: ", err)
 	}
-	node.connLock.Lock()
 	for node.online {
 		conn, err := node.listener.Accept()
 		if err != nil {
@@ -151,12 +147,7 @@ func (node *Kdm) RunRPCServer(wg *sync.WaitGroup) {
 			}
 			return
 		}
-		go func(c net.Conn) {
-			go node.server.ServeConn(c)
-			node.connLock.Lock()
-			c.Close()
-			node.connLock.Unlock()
-		}(conn)
+		go node.server.ServeConn(conn)
 	}
 }
 
@@ -166,36 +157,6 @@ func (node *Kdm) StopRPCServer() {
 	}
 	node.online = false
 	node.listener.Close()
-	node.connLock.Unlock()
-}
-
-func (node *Kdm) getClient(addr string) (*rpc.Client, error) {
-	node.clientLock.RLock()
-	tmp, ok := node.clients[addr]
-	node.clientLock.RUnlock()
-	if ok {
-		return tmp, nil
-	}
-
-	conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-	if err != nil {
-		return nil, err
-	}
-
-	client := rpc.NewClient(conn)
-	node.clientLock.Lock()
-	node.clients[addr] = client
-	node.clientLock.Unlock()
-	return client, nil
-}
-func (node *Kdm) removeClient(addr string, bad *rpc.Client) {
-	node.clientLock.Lock()
-	defer node.clientLock.Unlock()
-
-	if current, ok := node.clients[addr]; ok && current == bad {
-		delete(node.clients, addr)
-		current.Close()
-	}
 }
 
 func (node *Kdm) RemoteCall(target MyString, method string, args interface{}, reply interface{}, iflog bool) error {
@@ -205,16 +166,15 @@ func (node *Kdm) RemoteCall(target MyString, method string, args interface{}, re
 	if iflog {
 		logrus.Infof("[%s] RemoteCall %s %s %v", node.id.Val, target.Val, method, args)
 	}
-	client, err := node.getClient(target.Val)
+	conn, err := net.DialTimeout("tcp", target.Val, 10*time.Second)
 	if err != nil {
-		if iflog {
-			logrus.Error("RemoteCall tcp error: ", err)
-		}
+		logrus.Error("dialing: ", err)
 		return err
 	}
+	client := rpc.NewClient(conn)
+	defer client.Close()
 	err = client.Call(method, args, reply)
 	if err != nil {
-		node.removeClient(target.Val, client)
 		if iflog {
 			logrus.Error("RemoteCall error: ", err)
 		}
@@ -227,7 +187,6 @@ func (node *Kdm) RemoteCall(target MyString, method string, args interface{}, re
 	node.updateBucket(target)
 	var updateReply struct{}
 	if updateErr := client.Call("Kdm.UpdateBucket", node.id, &updateReply); updateErr != nil {
-		node.removeClient(target.Val, client)
 		logrus.Error("UpdateBucket notification error: ", updateErr)
 	}
 	return nil
@@ -852,7 +811,6 @@ func (node *Kdm) Init(addr string) {
 	node.data = make(map[MyString]string)
 	node.dataVersion = make(map[MyString]int)
 	node.datacnt = 0
-	node.clients = make(map[string]*rpc.Client)
 	node.resetBuckets()
 }
 func (node *Kdm) Create() {

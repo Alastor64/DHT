@@ -1,7 +1,7 @@
 package node
 
 func NewNode(port int) DhtNode {
-	node := new(Node)
+	node := new(Kdm)
 	node.Init(portToAddr(localAddress, port))
 	return node
 }
