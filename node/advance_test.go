@@ -57,7 +57,6 @@ func forceQuitTest() (bool, int, int) {
 		nodesInNetwork = append(nodesInNetwork, i)
 
 		time.Sleep(testutil.ForceQuitJoinSleepTime)
-		nodes[nodesInNetwork[0]].Dis(len(nodesInNetwork) + 1)
 	}
 	joinInfo.Finish(&forceQuitFailedCnt, &forceQuitTotalCnt)
 
@@ -93,8 +92,6 @@ func forceQuitTest() (bool, int, int) {
 			nodesInNetwork = testutil.RemoveFromArray(nodesInNetwork, idxInArray)
 
 			time.Sleep(testutil.ForceQuitFQSleepTime)
-
-			nodes[nodesInNetwork[0]].Dis(len(nodesInNetwork) + 1)
 		}
 
 		getInfo := testutil.TestInfo{

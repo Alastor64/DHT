@@ -14,5 +14,4 @@ type DhtNode interface {
 	Put(key string, value string) bool
 	Get(key string) (bool, string)
 	Delete(key string) bool
-	Dis(x int)
 }
