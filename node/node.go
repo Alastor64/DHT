@@ -84,6 +84,8 @@ type Node struct {
 	id     MyString
 	online bool
 
+	serverLock sync.Mutex
+	conns      map[net.Conn]struct{}
 	listener   net.Listener
 	server     *rpc.Server
 	data       map[MyString]string
@@ -100,12 +102,12 @@ type Node struct {
 	ifperiod   bool
 	clients    map[string]*rpc.Client
 	clientLock sync.RWMutex
-	connLock   sync.Mutex
 }
 
 // Initialize a node.
 // Addr is the address and port number of the node, e.g., "localhost:1234".
 func (node *Node) Init(addr string) {
+	node.conns = make(map[net.Conn]struct{})
 	node.id.Val = addr
 	node.id.Code = hashCode(addr)
 	node.suc = node.id
@@ -125,7 +127,6 @@ func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
 	if err != nil {
 		logrus.Fatal("listen error: ", err)
 	}
-	node.connLock.Lock()
 	for node.online {
 		conn, err := node.listener.Accept()
 		if err != nil {
@@ -134,22 +135,45 @@ func (node *Node) RunRPCServer(wg *sync.WaitGroup) {
 			}
 			return
 		}
+		node.serverLock.Lock()
+		if !node.online {
+			node.serverLock.Unlock()
+			conn.Close()
+			continue
+		}
+		node.conns[conn] = struct{}{}
+		node.serverLock.Unlock()
 		go func(c net.Conn) {
-			go node.server.ServeConn(c)
-			node.connLock.Lock()
-			c.Close()
-			node.connLock.Unlock()
+			defer func() {
+				node.serverLock.Lock()
+				delete(node.conns, c)
+				node.serverLock.Unlock()
+				c.Close()
+			}()
+			node.server.ServeConn(c)
 		}(conn)
 	}
 }
 
 func (node *Node) StopRPCServer() {
+	node.serverLock.Lock()
 	if !node.online {
+		node.serverLock.Unlock()
 		return
 	}
+
 	node.online = false
 	node.listener.Close()
-	node.connLock.Unlock()
+
+	conns := make([]net.Conn, 0, len(node.conns))
+	for conn := range node.conns {
+		conns = append(conns, conn)
+	}
+	node.serverLock.Unlock()
+
+	for _, conn := range conns {
+		conn.Close()
+	}
 }
 
 func (node *Node) getClient(addr string) (*rpc.Client, error) {
@@ -674,5 +698,5 @@ func (node *Node) Display(x int, reply *struct{}) error {
 	return nil
 }
 func (node *Node) Dis(x int) {
-	node.RemoteCall(node.id.Val, "Node.Display", x-1, nil, true)
+	// node.RemoteCall(node.id.Val, "Node.Display", x-1, nil, true)
 }
